@@ -15,11 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        goos: [linux, windows, darwin]
-        goarch: [amd64, arm64]
-        exclude:
-          - goarch: arm64
-            goos: windows
+        goos: [android]
+        goarch: [arm64]
     steps:
     - uses: actions/checkout@v4
     - uses: wangyoucao577/go-release-action@v1
@@ -28,7 +25,7 @@ jobs:
         goos: ${{ matrix.goos }}
         goarch: ${{ matrix.goarch }}
         project_path: "."
-        pre_command: "go mod tidy"
+        pre_command: "export CC=\"$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android32-clang\" && export CGO_ENABLED=1 && go mod tidy"
         build_flags: "-v"
         ldflags: "-s -w"
         binary_name: "ttm"
