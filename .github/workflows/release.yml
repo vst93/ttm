@@ -31,22 +31,7 @@ jobs:
         goos: ${{ matrix.goos }}
         goarch: ${{ matrix.goarch }}
         project_path: "."
-        pre_command: "
-  if [ \"\$GOOS\" = \"windows\" ]; then
-    export BINARY_SUFFIX=\"\$BINARY_SUFFIX.exe\"
-  fi
-  if [ \"\$GOOS\" = \"android\" ]; then
-    case \"\$GOARCH\" in
-      \"arm64\") export CC=\"\$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android32-clang\" ;;
-      \"arm\") export CC=\"\$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi32-clang\" ;;
-      \"amd64\") export CC=\"\$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android32-clang\" ;;
-      \"386\") export CC=\"\$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android32-clang\" ;;
-    esac
-  fi
-  export BINARY_NAME=\"\$BINARY_PREFIX\${GOOS}_\$GOARCH\$BINARY_SUFFIX\"
-  export CGO_ENABLED=\$( [ \"\$GOOS\" = \"android\" ] && echo 1 || echo 0 )
-  go mod tidy
-"
+        pre_command: "if [ \"\$GOOS\" = \"windows\" ]; then\n  export BINARY_SUFFIX=\"\$BINARY_SUFFIX.exe\"\nfi\nif [ \"\$GOOS\" = \"android\" ]; then\n  case \"\$GOARCH\" in\n    \"arm64\") export CC=\"\$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android32-clang\" ;;\n    \"arm\") export CC=\"\$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi32-clang\" ;;\n    \"amd64\") export CC=\"\$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android32-clang\" ;;\n    \"386\") export CC=\"\$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android32-clang\" ;;\n  esac\nfi\nexport BINARY_NAME=\"\$BINARY_PREFIX\${GOOS}_\$GOARCH\$BINARY_SUFFIX\"\nexport CGO_ENABLED=\$( [ \"\$GOOS\" = \"android\" ] && echo 1 || echo 0 )\ngo mod tidy"
         build_flags: "-v"
         ldflags: "-s -w"
         binary_name: "ttm"
