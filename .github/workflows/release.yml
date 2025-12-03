@@ -35,5 +35,6 @@ jobs:
         goarch: ${{ matrix.goarch }}
         project_path: "."
         pre_command: "go mod tidy"
-        build_flags: "-v -ldflags '-s -w'"
+        build_flags: "-v"
+        ldflags: "-s -w"
         binary_name: "ttm"
