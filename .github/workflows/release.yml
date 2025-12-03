@@ -15,11 +15,15 @@ jobs:
     strategy:
       matrix:
         # build and publish in parallel: linux/386, linux/amd64, linux/arm64, windows/386, windows/amd64, darwin/amd64, darwin/arm64
-        goos: [linux, windows, darwin]
+        goos: [linux, windows, darwin, android]
         goarch: ["386", amd64, arm64]
         exclude:
           - goarch: "386"
             goos: darwin
+          - goarch: "386"
+            goos: android
+          - goarch: "amd64"
+            goos: android
           - goarch: arm64
             goos: windows
     steps:
@@ -31,5 +35,5 @@ jobs:
         goarch: ${{ matrix.goarch }}
         project_path: "."
         pre_command: "go mod tidy"
-        build_flags: "-v"
-        binary_name: "ttm-${{ matrix.goos }}-${{ matrix.goarch }}"
+        build_flags: "-v -s -w"
+        binary_name: "ttm"
