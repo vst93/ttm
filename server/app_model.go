@@ -44,6 +44,8 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					AM.BookmarkInfo.Init()
 					AM.TipString = "同步成功"
 				}
+			} else {
+				AM.TipString = "同步失败," + err.Error()
 			}
 		} else if msg.String() == "enter" {
 			// 打开 ssh 连接
