@@ -1,51 +1,42 @@
 on:
   release:
     types: [created]
-env:
-  BINARY_PREFIX: "ttm"
-  BINARY_SUFFIX: ""
-  LD_FLAGS: "-w -s"
+
+permissions:
+    contents: write
+    packages: write
 
 jobs:
-  build:
-    name: Build binary CI
+  releases-matrix:
+    name: Release Go Binary
     runs-on: ubuntu-latest
     strategy:
       matrix:
         goos: [linux, windows, darwin, android]
         goarch: [amd64, arm64]
         exclude:
-         - goos: windows
-           goarch: arm64
-
-      fail-fast: true
+          - goarch: amd64
+            goos: android
+          - goarch: arm64
+            goos: windows
     steps:
-      - uses: actions/checkout@v4
-      - name: Setup Go environment
-        uses: actions/setup-go@v6
-        with:
-          go-version: 1.24.3
-      - name: Cache downloaded module
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ matrix.goos }}-${{ matrix.goarch }}-${{ hashFiles('**/go.sum') }}
-      - name: Build binary file
-        env:
+    - uses: actions/checkout@v4
+    - name: Set Go CGO
+      env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-        run: |
-          if [ $GOOS == "windows" ]; then export BINARY_SUFFIX="$BINARY_SUFFIX.exe"; fi
-          if [ "$GOOS" == "android" ]; then declare -A goarch2cc=( ["arm64"]="aarch64-linux-android32-clang" ["arm"]="armv7a-linux-androideabi32-clang" ["amd64"]="x86_64-linux-android32-clang" ["386"]="i686-linux-android32-clang"); export CC="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${goarch2cc[$GOARCH]}"; fi
-          export BINARY_NAME="$BINARY_PREFIX${GOOS}_$GOARCH$BINARY_SUFFIX"
-          export CGO_ENABLED=$( [ "$GOOS" == "android" ] && echo 1 || echo 0 )
-          go build -o "$GITHUB_WORKSPACE/output/$BINARY_NAME" -trimpath -ldflags "$LD_FLAGS" .
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        if: ${{ !github.head_ref }}
-        with:
-          name: ${{ matrix.goos }}_${{ matrix.goarch }}
-          path: output/
- 
+      run: |
+        if [ $GOOS == "windows" ]; then export BINARY_SUFFIX="$BINARY_SUFFIX.exe"; fi
+        if [ "$GOOS" == "android" ]; then declare -A goarch2cc=( ["arm64"]="aarch64-linux-android32-clang" ["arm"]="armv7a-linux-androideabi32-clang" ["amd64"]="x86_64-linux-android32-clang" ["386"]="i686-linux-android32-clang"); export CC="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${goarch2cc[$GOARCH]}"; fi
+        export BINARY_NAME="$BINARY_PREFIX${GOOS}_$GOARCH$BINARY_SUFFIX"
+        export CGO_ENABLED=$( [ "$GOOS" == "android" ] && echo 1 || echo 0 )
+    - uses: wangyoucao577/go-release-action@v1
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        goos: ${{ matrix.goos }}
+        goarch: ${{ matrix.goarch }}
+        project_path: "."
+        pre_command: "go mod tidy"
+        build_flags: "-v"
+        ldflags: "-s -w"
+        binary_name: "ttm"
