@@ -27,46 +27,40 @@ determine_install_dir() {
             echo "/usr/local/bin"
             # echo "使用 /usr/local/bin (可写权限)"
             return 0
-        else
-            echo "/usr/local/bin 存在但无写权限"
         fi
-    else
-        echo "/usr/local/bin 不存在"
     fi
     
     # 3. 检查 ~/../usr/local/bin (用户主目录上级的usr/local/bin)
     local home_parent_local="${HOME%/*}/usr/local/bin"
     if [ -n "$HOME" ] && [ -d "$home_parent_local" ]; then
         if [ -w "$home_parent_local" ]; then
-            echo "使用备用目录: $home_parent_local"
+            # echo "使用备用目录: $home_parent_local"
             echo "$home_parent_local"
             return 0
-        else
-            echo "$home_parent_local 存在但无写权限"
         fi
     fi
     
     # 4. 检查 ~/.local/bin (用户本地目录)
     local user_local_bin="$HOME/.local/bin"
     if [ -n "$HOME" ]; then
-        echo "使用用户本地目录: $user_local_bin"
+        # echo "使用用户本地目录: $user_local_bin"
         echo "$user_local_bin"
         return 0
     fi
     
     # 5. 最后尝试 ~/bin
     if [ -n "$HOME" ]; then
-        echo "使用用户 home 目录: $HOME/bin"
+        # echo "使用用户 home 目录: $HOME/bin"
         echo "$HOME/bin"
         return 0
     fi
 
     # 6. 尝试 termux 下的 ~/../usr/bin
-    if [ -n "$HOME" ]; then
-        echo "使用用户 home 目录: $HOME/../usr/bin"
-        echo "$HOME/../usr/bin"
-        return 0
-    fi
+    # if [ -n "$HOME" ]; then
+    #     echo "使用用户 home 目录: $HOME/../usr/bin"
+    #     echo "$HOME/../usr/bin"
+    #     return 0
+    # fi
     
     # 如果所有选项都失败
     echo "错误: 无法确定安装目录"
