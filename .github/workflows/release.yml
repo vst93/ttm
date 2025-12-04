@@ -47,7 +47,8 @@ jobs:
           export BINARY_NAME="$BINARY_PREFIX$BINARY_SUFFIX"
           export CGO_ENABLED=$( [ "$GOOS" == "android" ] && echo 1 || echo 0 )
           go build -o "$GITHUB_WORKSPACE/output/$BINARY_NAME" -trimpath -ldflags "$LD_FLAGS" .
-          zip "$GITHUB_WORKSPACE/output/$BINARY_PREFIX-$GOOS-$GOARCH.zip" "$GITHUB_WORKSPACE/output/$BINARY_NAME"
+          cd "$GITHUB_WORKSPACE/output"
+          zip "$BINARY_PREFIX-$GOOS-$GOARCH.zip" "$BINARY_NAME"
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
         with:
