@@ -1,6 +1,11 @@
 on:
   release:
     types: [created]
+
+permissions:
+ contents: write
+ packages: write
+
 env:
   BINARY_PREFIX: "ttm"
   BINARY_SUFFIX: ""
@@ -39,15 +44,15 @@ jobs:
         run: |
           if [ $GOOS == "windows" ]; then export BINARY_SUFFIX="$BINARY_SUFFIX.exe"; fi
           if [ "$GOOS" == "android" ]; then declare -A goarch2cc=( ["arm64"]="aarch64-linux-android32-clang" ["arm"]="armv7a-linux-androideabi32-clang" ["amd64"]="x86_64-linux-android32-clang" ["386"]="i686-linux-android32-clang"); export CC="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${goarch2cc[$GOARCH]}"; fi
-          export BINARY_NAME="$BINARY_PREFIX${GOOS}_$GOARCH$BINARY_SUFFIX"
+          export BINARY_NAME="$BINARY_PREFIX$BINARY_SUFFIX"
           export CGO_ENABLED=$( [ "$GOOS" == "android" ] && echo 1 || echo 0 )
           go build -o "$GITHUB_WORKSPACE/output/$BINARY_NAME" -trimpath -ldflags "$LD_FLAGS" .
+          zip "$GITHUB_WORKSPACE/output/$BINARY_NAME.zip" "$GITHUB_WORKSPACE/output/$BINARY_NAME"
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: output/${{ env.BINARY_PREFIX }}*
-          tag: ${{ github.ref }}
+          file: output/${{ env.BINARY_PREFIX }}*.zip
           overwrite: true
           file_glob: true
  
