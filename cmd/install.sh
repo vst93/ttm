@@ -5,9 +5,66 @@ set -e
 # 配置信息
 VERSION="0.1.0"
 REPO="https://github.com/vst93/ttm"
-INSTALL_DIR="/usr/local/bin"
 BINARY_NAME="ttm"
 TEMP_DIR=$(mktemp -d)
+
+# 确定安装目录
+determine_install_dir() {
+    # 优先级：用户指定 > /usr/local/bin > ~/.local/bin > ~/bin
+    local install_dir=""
+    
+    # 1. 检查用户是否指定了安装目录
+    if [ -n "$INSTALL_DIR" ]; then
+        install_dir="$INSTALL_DIR"
+        echo "使用用户指定的安装目录: $install_dir"
+        echo "$install_dir"
+        return 0
+    fi
+    
+    # 2. 检查 /usr/local/bin
+    if [ -d "/usr/local/bin" ]; then
+        if [ -w "/usr/local/bin" ]; then
+            echo "/usr/local/bin"
+            # echo "使用 /usr/local/bin (可写权限)"
+            return 0
+        else
+            echo "/usr/local/bin 存在但无写权限"
+        fi
+    else
+        echo "/usr/local/bin 不存在"
+    fi
+    
+    # 3. 检查 ~/../usr/local/bin (用户主目录上级的usr/local/bin)
+    local home_parent_local="${HOME%/*}/usr/local/bin"
+    if [ -n "$HOME" ] && [ -d "$home_parent_local" ]; then
+        if [ -w "$home_parent_local" ]; then
+            echo "使用备用目录: $home_parent_local"
+            echo "$home_parent_local"
+            return 0
+        else
+            echo "$home_parent_local 存在但无写权限"
+        fi
+    fi
+    
+    # 4. 检查 ~/.local/bin (用户本地目录)
+    local user_local_bin="$HOME/.local/bin"
+    if [ -n "$HOME" ]; then
+        echo "使用用户本地目录: $user_local_bin"
+        echo "$user_local_bin"
+        return 0
+    fi
+    
+    # 5. 最后尝试 ~/bin
+    if [ -n "$HOME" ]; then
+        echo "使用用户家目录: $HOME/bin"
+        echo "$HOME/bin"
+        return 0
+    fi
+    
+    # 如果所有选项都失败
+    echo "错误: 无法确定安装目录"
+    exit 1
+}
 
 # 清理函数
 cleanup() {
@@ -120,9 +177,40 @@ verify_sha256() {
     return 0
 }
 
+# 确保目录存在并返回是否需要sudo
+ensure_dir_exists() {
+    local dir="$1"
+    
+    if [ ! -d "$dir" ]; then
+        echo "创建目录: $dir"
+        # 尝试创建目录
+        if mkdir -p "$dir" 2>/dev/null; then
+            echo "目录创建成功"
+            return 0  # 不需要sudo
+        else
+            echo "需要sudo权限创建目录"
+            if sudo mkdir -p "$dir"; then
+                return 1  # 需要sudo
+            else
+                echo "无法创建目录: $dir"
+                exit 1
+            fi
+        fi
+    else
+        # 检查写权限
+        if [ -w "$dir" ]; then
+            return 0  # 不需要sudo
+        else
+            echo "目录 $dir 存在但无写权限"
+            return 1  # 需要sudo
+        fi
+    fi
+}
+
 # 安装二进制文件
 install_binary() {
     local zip_file="$1"
+    local install_dir="$2"
     
     echo "解压文件..."
     unzip -q "$zip_file" -d "$TEMP_DIR"
@@ -134,21 +222,19 @@ install_binary() {
         exit 1
     fi
     
-    echo "安装到 $INSTALL_DIR"
+    echo "安装到 $install_dir"
     chmod +x "$binary_path"
     
-    # 检查安装目录是否存在
-    if [ ! -d "$INSTALL_DIR" ]; then
-        echo "创建安装目录: $INSTALL_DIR"
-        sudo mkdir -p "$INSTALL_DIR"
-    fi
-    
-    # 移动文件到安装目录
-    if [ -w "$INSTALL_DIR" ]; then
-        mv "$binary_path" "$INSTALL_DIR/"
+    # 确保安装目录存在并检查权限
+    if ensure_dir_exists "$install_dir"; then
+        # 不需要sudo
+        mv "$binary_path" "$install_dir/"
+        echo "文件移动成功"
     else
-        echo "需要sudo权限写入 $INSTALL_DIR"
-        sudo mv "$binary_path" "$INSTALL_DIR/"
+        # 需要sudo
+        echo "需要sudo权限写入 $install_dir"
+        sudo mv "$binary_path" "$install_dir/"
+        echo "文件移动成功 (使用sudo)"
     fi
     
     # 验证安装
@@ -156,15 +242,36 @@ install_binary() {
         echo "安装成功!"
         echo "$BINARY_NAME 版本: $($BINARY_NAME --version 2>/dev/null || echo '已安装')"
     else
-        echo "警告: 可能需要在PATH中添加 $INSTALL_DIR"
-        echo "请将以下行添加到你的shell配置文件中:"
-        echo "export PATH=\"$INSTALL_DIR:\$PATH\""
+        echo "注意: $BINARY_NAME 可能不在你的PATH中"
+        echo "安装位置: $install_dir"
+        echo "请确保 $install_dir 在你的PATH环境变量中"
+        
+        # 提供添加PATH的建议
+        local shell_rc=""
+        if [ -f "$HOME/.bashrc" ]; then
+            shell_rc="~/.bashrc"
+        elif [ -f "$HOME/.zshrc" ]; then
+            shell_rc="~/.zshrc"
+        elif [ -f "$HOME/.profile" ]; then
+            shell_rc="~/.profile"
+        fi
+        
+        if [ -n "$shell_rc" ]; then
+            echo ""
+            echo "你可以运行以下命令将其添加到PATH:"
+            echo "  echo 'export PATH=\"$install_dir:\$PATH\"' >> $shell_rc"
+            echo "然后重新加载配置: source $shell_rc"
+        fi
     fi
 }
 
 # 主安装流程
 main() {
     echo "开始安装 $BINARY_NAME v$VERSION"
+    
+    # 确定安装目录
+    INSTALL_DIR=$(determine_install_dir)
+    echo "最终安装目录: $INSTALL_DIR"
     
     # 检测平台
     detect_platform
@@ -196,7 +303,7 @@ main() {
     fi
     
     # 安装
-    install_binary "$zip_file"
+    install_binary "$zip_file" "$INSTALL_DIR"
 }
 
 # 运行主函数
