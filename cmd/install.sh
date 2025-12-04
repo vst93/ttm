@@ -25,7 +25,6 @@ determine_install_dir() {
     if [ -d "/usr/local/bin" ]; then
         if [ -w "/usr/local/bin" ]; then
             echo "/usr/local/bin"
-            # echo "使用 /usr/local/bin (可写权限)"
             return 0
         fi
     fi
@@ -34,7 +33,6 @@ determine_install_dir() {
     local home_parent_local="${HOME%/*}/usr/local/bin"
     if [ -n "$HOME" ] && [ -d "$home_parent_local" ]; then
         if [ -w "$home_parent_local" ]; then
-            # echo "使用备用目录: $home_parent_local"
             echo "$home_parent_local"
             return 0
         fi
@@ -43,25 +41,16 @@ determine_install_dir() {
     # 4. 检查 ~/.local/bin (用户本地目录)
     local user_local_bin="$HOME/.local/bin"
     if [ -n "$HOME" ]; then
-        # echo "使用用户本地目录: $user_local_bin"
         echo "$user_local_bin"
         return 0
     fi
     
     # 5. 最后尝试 ~/bin
     if [ -n "$HOME" ]; then
-        # echo "使用用户 home 目录: $HOME/bin"
         echo "$HOME/bin"
         return 0
     fi
 
-    # 6. 尝试 termux 下的 ~/../usr/bin
-    # if [ -n "$HOME" ]; then
-    #     echo "使用用户 home 目录: $HOME/../usr/bin"
-    #     echo "$HOME/../usr/bin"
-    #     return 0
-    # fi
-    
     # 如果所有选项都失败
     echo "错误: 无法确定安装目录"
     exit 1
@@ -116,7 +105,7 @@ detect_platform() {
     echo "检测到系统: $OS-$ARCH"
 }
 
-# 构建下载URL和SHA256校验值
+# 构建下载URL
 get_download_info() {
     local os="$1"
     local arch="$2"
@@ -124,27 +113,21 @@ get_download_info() {
     case "$os-$arch" in
         darwin-arm64)
             FILENAME="ttm-darwin-arm64.zip"
-            SHA256="1d726ce214fad246a3911ed3f9c98988a66df1610d373a633659da7f1551d3a3"
             ;;
         darwin-amd64)
             FILENAME="ttm-darwin-amd64.zip"
-            SHA256="3208667d66aadfd560fa2d9b6171d266d0c5e5de69d2e9556aabea5cfd62c74f"
             ;;
         linux-arm64)
             FILENAME="ttm-linux-arm64.zip"
-            SHA256="902a0b784d2746f4fa818afed42fbc0e86aa5cb19aee2ff95401c1aa763493ae"
             ;;
         linux-amd64)
             FILENAME="ttm-linux-amd64.zip"
-            SHA256="e795778242c04e3554e6a0f35ca934d507b294663f1af119604ec15fd35385a5"
             ;;
         android-arm64)
             FILENAME="ttm-android-arm64.zip"
-            SHA256="0d466f44afdab4484d6e6242d5329bbbfe0c38587573a082323c65509a97dbae"
             ;;
         android-amd64)
             FILENAME="ttm-android-amd64.zip"
-            SHA256="586c79b5b147ba36243c8437668a4326e5b5684daae766fa852f78ea5d7b95c3"
             ;;
         *)
             echo "没有找到适用于 $os-$arch 的版本"
@@ -155,17 +138,64 @@ get_download_info() {
     DOWNLOAD_URL="${REPO}/releases/download/${VERSION}/${FILENAME}"
 }
 
+# 下载文件
+download_file() {
+    local url="$1"
+    local output_file="$2"
+    
+    # echo "正在下载: $url"
+    
+    if command -v curl &> /dev/null; then
+        curl -L -o "$output_file" "$url"
+    elif command -v wget &> /dev/null; then
+        wget -O "$output_file" "$url"
+    else
+        echo "错误: 需要curl或wget进行下载"
+        exit 1
+    fi
+    
+    # 检查下载是否成功
+    if [ ! -f "$output_file" ] || [ ! -s "$output_file" ]; then
+        echo "错误: 文件下载失败或为空"
+        exit 1
+    fi
+}
+
+# 获取SHA256校验值
+get_sha256_hash() {
+    local sha256_url="$1"
+    local temp_sha_file="$TEMP_DIR/$(basename "$sha256_url")"
+    
+    # 下载SHA256文件
+    download_file "$sha256_url" "$temp_sha_file"
+    
+    # 从SHA256文件中提取校验值
+    # SHA256文件格式通常是: "hash filename" 或只有 "hash"
+    if grep -q " " "$temp_sha_file"; then
+        # 格式为 "hash filename"，提取第一个字段
+        cut -d ' ' -f 1 "$temp_sha_file"
+    else
+        # 格式为只有 "hash"
+        cat "$temp_sha_file"
+    fi
+}
+
 # 验证SHA256
 verify_sha256() {
     local file="$1"
     local expected_sha="$2"
     
-    if ! command -v shasum &> /dev/null; then
-        echo "警告: 找不到shasum命令，跳过校验"
+    if ! command -v shasum &> /dev/null && ! command -v sha256sum &> /dev/null; then
+        echo "警告: 找不到shasum或sha256sum命令，跳过校验"
         return 0
     fi
     
-    local actual_sha=$(shasum -a 256 "$file" | cut -d ' ' -f1)
+    local actual_sha=""
+    if command -v shasum &> /dev/null; then
+        actual_sha=$(shasum -a 256 "$file" | cut -d ' ' -f1)
+    elif command -v sha256sum &> /dev/null; then
+        actual_sha=$(sha256sum "$file" | cut -d ' ' -f1)
+    fi
     
     if [ "$actual_sha" != "$expected_sha" ]; then
         echo "SHA256校验失败!"
@@ -283,22 +313,31 @@ main() {
     echo "下载地址: $DOWNLOAD_URL"
     
     # 下载文件
-    echo "正在下载..."
     local zip_file="$TEMP_DIR/$FILENAME"
+    download_file "$DOWNLOAD_URL" "$zip_file"
     
-    if command -v curl &> /dev/null; then
-        curl -L -o "$zip_file" "$DOWNLOAD_URL"
-    elif command -v wget &> /dev/null; then
-        wget -O "$zip_file" "$DOWNLOAD_URL"
-    else
-        echo "错误: 需要curl或wget进行下载"
-        exit 1
-    fi
+    # 获取并验证SHA256
+    local sha256_url="${DOWNLOAD_URL}.sha256"
+    echo "获取SHA256校验值: $sha256_url"
     
-    # 验证SHA256
-    if [ -n "$SHA256" ]; then
+    local expected_sha=""
+    if expected_sha=$(get_sha256_hash "$sha256_url"); then
         echo "验证文件完整性..."
-        if ! verify_sha256 "$zip_file" "$SHA256"; then
+        if ! verify_sha256 "$zip_file" "$expected_sha"; then
+            echo "警告: SHA256校验失败，但继续安装"
+            read -p "是否继续安装? (y/N): " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                echo "安装已取消"
+                exit 1
+            fi
+        fi
+    else
+        echo "警告: 无法获取SHA256校验值，跳过校验"
+        read -p "是否继续安装? (y/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "安装已取消"
             exit 1
         fi
     fi
