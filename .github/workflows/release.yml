@@ -42,10 +42,12 @@ jobs:
           export BINARY_NAME="$BINARY_PREFIX${GOOS}_$GOARCH$BINARY_SUFFIX"
           export CGO_ENABLED=$( [ "$GOOS" == "android" ] && echo 1 || echo 0 )
           go build -o "$GITHUB_WORKSPACE/output/$BINARY_NAME" -trimpath -ldflags "$LD_FLAGS" .
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        if: ${{ !github.head_ref }}
+      - name: Upload binaries to release
+        uses: svenstaro/upload-release-action@v2
         with:
-          name: ${{ matrix.goos }}_${{ matrix.goarch }}
-          path: output/
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: output/${{ BINARY_PREFIX }}*
+          tag: ${{ github.ref }}
+          overwrite: true
+          file_glob: true
  
