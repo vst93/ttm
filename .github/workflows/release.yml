@@ -49,7 +49,7 @@ jobs:
           go build -o "$GITHUB_WORKSPACE/output/$BINARY_NAME" -trimpath -ldflags "$LD_FLAGS" .
           cd "$GITHUB_WORKSPACE/output"
           zip "$BINARY_PREFIX-$GOOS-$GOARCH.zip" "$BINARY_NAME"
-          md5sum "$BINARY_PREFIX-$GOOS-$GOARCH.zip" > "$BINARY_PREFIX-$GOOS-$GOARCH.zip.md5"
+          md5sum "$BINARY_PREFIX-$GOOS-$GOARCH.zip" | cut -d" " -f1 > "$BINARY_PREFIX-$GOOS-$GOARCH.zip.md5"
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
         with:
