@@ -56,8 +56,15 @@ determine_install_dir() {
     
     # 5. 最后尝试 ~/bin
     if [ -n "$HOME" ]; then
-        echo "使用用户家目录: $HOME/bin"
+        echo "使用用户 home 目录: $HOME/bin"
         echo "$HOME/bin"
+        return 0
+    fi
+
+    # 6. 尝试 termux 下的 ~/../usr/bin
+    if [ -n "$HOME" ]; then
+        echo "使用用户 home 目录: $HOME/../usr/bin"
+        echo "$HOME/../usr/bin"
         return 0
     fi
     
