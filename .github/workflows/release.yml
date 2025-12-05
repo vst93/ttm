@@ -93,8 +93,8 @@ jobs:
           # sed -i "s/SHA256_LINUX_ARM64/$TPL_SHA256_LINUX_ARM64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
           # sed -i "s/SHA256_LINUX_AMD64/$TPL_SHA256_LINUX_AMD64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
           # 推送到 Homebrew
-          git config --global user.name "vst93"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "vst"
+          git config --global user.email "vst93g@gmail.com"
           git clone git@github.com:vst93/homebrew-tap.git
           cd homebrew-tap
           git checkout main
