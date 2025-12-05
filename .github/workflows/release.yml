@@ -11,6 +11,17 @@ env:
   BINARY_SUFFIX: ""
   LD_FLAGS: "-w -s"
 
+  # homebrew tap Formula template values
+  TPL_CLASS_NAME: "Ttm"
+  TPL_NAME: BINARY_PREFIX
+  TPL_DESC: "TUI Terminal Manager"
+  TPL_HOMEPAGE: "https://github.com/vst93/ttm"
+  TPL_VERSION: "${{ github.event.release.tag_name }}"
+  TPL_SHA256_DRAWIN_ARM64: ""
+  TPL_SHA256_DRAWIN_AMD64: ""
+  TPL_SHA256_LINUX_ARM64: ""
+  TPL_SHA256_LINUX_AMD64: ""
+
 jobs:
   build:
     name: Build binary CI
@@ -50,6 +61,10 @@ jobs:
           cd "$GITHUB_WORKSPACE/output"
           zip "$BINARY_PREFIX-$GOOS-$GOARCH.zip" "$BINARY_NAME"
           sha256sum "$BINARY_PREFIX-$GOOS-$GOARCH.zip" | awk '{printf $1}' > "$BINARY_PREFIX-$GOOS-$GOARCH.zip.sha256"
+          if [ "$GOOS" == "linux" && "$GOARCH" == "amd64" ]; then $TPL_SHA256_LINUX_AMD64=$(sha256sum "$BINARY_PREFIX-$GOOS-$GOARCH.zip" | awk '{printf $1}') ; fi
+          if [ "$GOOS" == "linux" && "$GOARCH" == "arm64" ]; then $TPL_SHA256_LINUX_ARM64=$(sha256sum "$BINARY_PREFIX-$GOOS-$GOARCH.zip" | awk '{printf $1}') ; fi
+          if [ "$GOOS" == "darwin" && "$GOARCH" == "amd64" ]; then $TPL_SHA256_DRAWIN_AMD64=$(sha256sum "$BINARY_PREFIX-$GOOS-$GOARCH.zip" | awk '{printf $1}') ; fi
+          if [ "$GOOS" == "darwin" && "$GOARCH" == "arm64" ]; then $TPL_SHA256_DRAWIN_ARM64=$(sha256sum "$BINARY_PREFIX-$GOOS-$GOARCH.zip" | awk '{printf $1}') ; fi
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
         with:
@@ -57,3 +72,28 @@ jobs:
           file: output/${{ env.BINARY_PREFIX }}*.zip*
           overwrite: true
           file_glob: true
+      - name: Update Homebrew formula
+        run: |
+          # 获取网络文件作为模板
+          curl -L -o "$GITHUB_WORKSPACE/$TPL_NAME.rb" "https://raw.githubusercontent.com/vst93/homebrew-tap/refs/heads/main/template/formula.tpl"
+          # 替换模板中的变量
+          sed -i "s/CLASS_NAME/$TPL_CLASS_NAME/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
+          sed -i "s/NAME/$TPL_NAME/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
+          sed -i "s/DESC/$TPL_DESC/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
+          sed -i "s/HOMEPAGE/$TPL_HOMEPAGE/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
+          sed -i "s/VERSION/$TPL_VERSION/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
+          sed -i "s/SHA256_DRAWIN_ARM64/$TPL_SHA256_DRAWIN_ARM64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
+          sed -i "s/SHA256_DRAWIN_AMD64/$TPL_SHA256_DRAWIN_AMD64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
+          sed -i "s/SHA256_LINUX_ARM64/$TPL_SHA256_LINUX_ARM64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
+          sed -i "s/SHA256_LINUX_AMD64/$TPL_SHA256_LINUX_AMD64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
+          # 推送到 Homebrew
+          git config --global user.name "vst93"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git clone git@github.com:vst93/homebrew-tap.git
+          cd homebrew-tap
+          git checkout main
+          git pull
+          cp "$GITHUB_WORKSPACE/$TPL_NAME.rb" Formula2/
+          git add "$GITHUB_WORKSPACE/$TPL_NAME.rb"
+          git commit -m "Update $TPL_NAME formula to $TPL_VERSION"
+          git push origin main
