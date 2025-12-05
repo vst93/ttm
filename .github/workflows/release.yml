@@ -72,20 +72,26 @@ jobs:
           file: output/${{ env.BINARY_PREFIX }}*.zip*
           overwrite: true
           file_glob: true
+
+  update_homebrew:
+    name: Update Homebrew formula
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
       - name: Update Homebrew formula
         run: |
           # 获取网络文件作为模板
           curl -L -o "$GITHUB_WORKSPACE/$TPL_NAME.rb" "https://raw.githubusercontent.com/vst93/homebrew-tap/refs/heads/main/template/formula.tpl"
           # 替换模板中的变量
-          sed -i "s/CLASS_NAME/$TPL_CLASS_NAME/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
-          sed -i "s/NAME/$TPL_NAME/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
-          sed -i "s/DESC/$TPL_DESC/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
-          sed -i "s/HOMEPAGE/$TPL_HOMEPAGE/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
-          sed -i "s/VERSION/$TPL_VERSION/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
-          sed -i "s/SHA256_DRAWIN_ARM64/$TPL_SHA256_DRAWIN_ARM64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
-          sed -i "s/SHA256_DRAWIN_AMD64/$TPL_SHA256_DRAWIN_AMD64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
-          sed -i "s/SHA256_LINUX_ARM64/$TPL_SHA256_LINUX_ARM64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
-          sed -i "s/SHA256_LINUX_AMD64/$TPL_SHA256_LINUX_AMD64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
+          # sed -i "s/CLASS_NAME/$TPL_CLASS_NAME/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
+          # sed -i "s/NAME/$TPL_NAME/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
+          # sed -i "s/DESC/$TPL_DESC/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
+          # sed -i "s/HOMEPAGE/$TPL_HOMEPAGE/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
+          # sed -i "s/VERSION/$TPL_VERSION/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
+          # sed -i "s/SHA256_DRAWIN_ARM64/$TPL_SHA256_DRAWIN_ARM64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
+          # sed -i "s/SHA256_DRAWIN_AMD64/$TPL_SHA256_DRAWIN_AMD64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
+          # sed -i "s/SHA256_LINUX_ARM64/$TPL_SHA256_LINUX_ARM64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
+          # sed -i "s/SHA256_LINUX_AMD64/$TPL_SHA256_LINUX_AMD64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
           # 推送到 Homebrew
           git config --global user.name "vst93"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -97,3 +103,4 @@ jobs:
           git add "$GITHUB_WORKSPACE/$TPL_NAME.rb"
           git commit -m "Update $TPL_NAME formula to $TPL_VERSION"
           git push origin main
+
