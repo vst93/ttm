@@ -96,14 +96,18 @@ jobs:
           # sed -i "s/SHA256_DRAWIN_AMD64/$TPL_SHA256_DRAWIN_AMD64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
           # sed -i "s/SHA256_LINUX_ARM64/$TPL_SHA256_LINUX_ARM64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
           # sed -i "s/SHA256_LINUX_AMD64/$TPL_SHA256_LINUX_AMD64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
-          # 推送到 Homebrew
-          git clone git@github.com:vst93/homebrew-tap.git
-          cd homebrew-tap
-          git checkout main
-          git pull
-          cp "$GITHUB_WORKSPACE/$TPL_NAME.rb" Formula2/
-      - name: Commit & Push changes
-        uses: actions-js/push@master
+      - name: Create Pull Request to Homebrew Tap
+        uses: peter-evans/create-pull-request@v5
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: update-ttm-${{ github.event.release.tag_name }}
+          base: main 
+          repository: vst93/homebrew-tap
+          title: "Update ttm to ${{ github.event.release.tag_name }}"
+          body: |
+            This PR updates the ttm formula to version ${{ github.event.release.tag_name }}.
+            SHA256 values have been automatically calculated for all platforms.
+            - **Release URL**: ${{ github.event.release.html_url }}
+          commit-message: "Update ttm to ${{ github.event.release.tag_name }}"
+          labels: automated-pr, formula-update
 
