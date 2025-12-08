@@ -3,29 +3,24 @@ on:
     types: [created]
 
 permissions:
- contents: write
- packages: write
+  contents: write
+  packages: write
 
 env:
   BINARY_PREFIX: "ttm"
   BINARY_SUFFIX: ""
   LD_FLAGS: "-w -s"
 
-  # homebrew tap Formula template values
-  TPL_CLASS_NAME: "Ttm"
-  TPL_NAME: BINARY_PREFIX
-  TPL_DESC: "TUI Terminal Manager"
-  TPL_HOMEPAGE: "https://github.com/vst93/ttm"
-  TPL_VERSION: "${{ github.event.release.tag_name }}"
-  TPL_SHA256_DRAWIN_ARM64: ""
-  TPL_SHA256_DRAWIN_AMD64: ""
-  TPL_SHA256_LINUX_ARM64: ""
-  TPL_SHA256_LINUX_AMD64: ""
-
 jobs:
   build:
     name: Build binary CI
     runs-on: ubuntu-latest
+    outputs: # 定义输出变量，供后续 job 使用
+      sha256_darwin_arm64: ${{ steps.set-outputs.outputs.sha256_darwin_arm64 }}
+      sha256_darwin_amd64: ${{ steps.set-outputs.outputs.sha256_darwin_amd64 }}
+      sha256_linux_arm64: ${{ steps.set-outputs.outputs.sha256_linux_arm64 }}
+      sha256_linux_amd64: ${{ steps.set-outputs.outputs.sha256_linux_amd64 }}
+    
     strategy:
       matrix:
         goos: [linux, windows, darwin, android]
@@ -37,17 +32,15 @@ jobs:
       fail-fast: true
     steps:
       - uses: actions/checkout@v4
+      
       - name: Setup Go environment
         uses: actions/setup-go@v6
         with:
           go-version: 1.24.3
-      - name: Cache downloaded module
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ matrix.goos }}-${{ matrix.goarch }}-${{ hashFiles('**/go.sum') }}
+      
+      - name: Create output directory
+        run: mkdir -p "$GITHUB_WORKSPACE/output"
+      
       - name: Build binary file
         env:
           GOOS: ${{ matrix.goos }}
@@ -58,13 +51,28 @@ jobs:
           export BINARY_NAME="$BINARY_PREFIX$BINARY_SUFFIX"
           export CGO_ENABLED=$( [ "$GOOS" == "android" ] && echo 1 || echo 0 )
           go build -o "$GITHUB_WORKSPACE/output/$BINARY_NAME" -trimpath -ldflags "$LD_FLAGS" .
+          
           cd "$GITHUB_WORKSPACE/output"
-          zip "$BINARY_PREFIX-$GOOS-$GOARCH.zip" "$BINARY_NAME"
-          sha256sum "$BINARY_PREFIX-$GOOS-$GOARCH.zip" | awk '{printf $1}' > "$BINARY_PREFIX-$GOOS-$GOARCH.zip.sha256"
-          if [ "$GOOS" == "linux" && "$GOARCH" == "amd64" ]; then $TPL_SHA256_LINUX_AMD64=$(sha256sum "$BINARY_PREFIX-$GOOS-$GOARCH.zip" | awk '{printf $1}') ; fi
-          if [ "$GOOS" == "linux" && "$GOARCH" == "arm64" ]; then $TPL_SHA256_LINUX_ARM64=$(sha256sum "$BINARY_PREFIX-$GOOS-$GOARCH.zip" | awk '{printf $1}') ; fi
-          if [ "$GOOS" == "darwin" && "$GOARCH" == "amd64" ]; then $TPL_SHA256_DRAWIN_AMD64=$(sha256sum "$BINARY_PREFIX-$GOOS-$GOARCH.zip" | awk '{printf $1}') ; fi
-          if [ "$GOOS" == "darwin" && "$GOARCH" == "arm64" ]; then $TPL_SHA256_DRAWIN_ARM64=$(sha256sum "$BINARY_PREFIX-$GOOS-$GOARCH.zip" | awk '{printf $1}') ; fi
+          ZIP_NAME="$BINARY_PREFIX-$GOOS-$GOARCH.zip"
+          zip "$ZIP_NAME" "$BINARY_NAME"
+          
+          # 计算 SHA256 并保存到文件
+          SHA256=$(sha256sum "$ZIP_NAME" | awk '{print $1}')
+          echo "$SHA256" > "$ZIP_NAME.sha256"
+          
+          # 将 SHA256 保存到环境文件，供后续步骤使用
+          if [ "$GOOS" == "linux" ] && [ "$GOARCH" == "amd64" ]; then
+            echo "SHA256_LINUX_AMD64=$SHA256" >> $GITHUB_ENV
+          elif [ "$GOOS" == "linux" ] && [ "$GOARCH" == "arm64" ]; then
+            echo "SHA256_LINUX_ARM64=$SHA256" >> $GITHUB_ENV
+          elif [ "$GOOS" == "darwin" ] && [ "$GOARCH" == "amd64" ]; then
+            echo "SHA256_DARWIN_AMD64=$SHA256" >> $GITHUB_ENV
+          elif [ "$GOOS" == "darwin" ] && [ "$GOARCH" == "arm64" ]; then
+            echo "SHA256_DARWIN_ARM64=$SHA256" >> $GITHUB_ENV
+          fi
+          
+          echo "Built $ZIP_NAME with SHA256: $SHA256"
+      
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
         with:
@@ -72,42 +80,92 @@ jobs:
           file: output/${{ env.BINARY_PREFIX }}*.zip*
           overwrite: true
           file_glob: true
+      
+      - name: Set outputs for Homebrew update
+        id: set-outputs
+        run: |
+          # 设置输出变量，这些会被 job 的 outputs 捕获
+          echo "sha256_darwin_arm64=${{ env.SHA256_DARWIN_ARM64 }}" >> $GITHUB_OUTPUT
+          echo "sha256_darwin_amd64=${{ env.SHA256_DARWIN_AMD64 }}" >> $GITHUB_OUTPUT
+          echo "sha256_linux_arm64=${{ env.SHA256_LINUX_ARM64 }}" >> $GITHUB_OUTPUT
+          echo "sha256_linux_amd64=${{ env.SHA256_LINUX_AMD64 }}" >> $GITHUB_OUTPUT
 
   update_homebrew:
     name: Update Homebrew formula
     runs-on: ubuntu-latest
-    needs: build
+    needs: build  # 依赖 build job
     steps:
-      - uses: actions/checkout@master
+      - name: Checkout tap repository
+        uses: actions/checkout@v4
         with:
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Update Homebrew formula
+          repository: vst93/homebrew-tap
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Download template
         run: |
-          # 获取网络文件作为模板
-          curl -L -o "$GITHUB_WORKSPACE/$TPL_NAME.rb" "https://raw.githubusercontent.com/vst93/homebrew-tap/refs/heads/main/template/formula.tpl"
+          # 下载模板文件 (假设你有一个模板文件)
+          curl -L -o formula-template.rb "https://raw.githubusercontent.com/vst93/homebrew-tap/main/template/formula.tpl" || echo "使用内置模板"
+          
+          # 如果下载失败，使用内置模板
+          if [ ! -f formula-template.rb ]; then
+            # 终止当前步骤
+            echo "下载模板失败，使用内置模板"
+            exit 1
+          fi
+      
+      - name: Update formula with actual values
+        run: |
+          # 从 build job 获取 SHA256 值
+          SHA256_DARWIN_ARM64="${{ needs.build.outputs.sha256_darwin_arm64 }}"
+          SHA256_DARWIN_AMD64="${{ needs.build.outputs.sha256_darwin_amd64 }}"
+          SHA256_LINUX_ARM64="${{ needs.build.outputs.sha256_linux_arm64 }}"
+          SHA256_LINUX_AMD64="${{ needs.build.outputs.sha256_linux_amd64 }}"
+          VERSION="${GITHUB_REF#refs/tags/}"  # 从 tag 获取版本
+          CLEAN_VERSION="${VERSION#v}"  # 去掉 v 前缀
+          
+          echo "版本: $CLEAN_VERSION"
+          echo "SHA256 (darwin-arm64): $SHA256_DARWIN_ARM64"
+          echo "SHA256 (darwin-amd64): $SHA256_DARWIN_AMD64"
+          echo "SHA256 (linux-arm64): $SHA256_LINUX_ARM64"
+          echo "SHA256 (linux-amd64): $SHA256_LINUX_AMD64"
+          
           # 替换模板中的变量
-          # sed -i "s/CLASS_NAME/$TPL_CLASS_NAME/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
-          # sed -i "s/NAME/$TPL_NAME/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
-          # sed -i "s/DESC/$TPL_DESC/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
-          # sed -i "s/HOMEPAGE/$TPL_HOMEPAGE/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
-          # sed -i "s/VERSION/$TPL_VERSION/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
-          # sed -i "s/SHA256_DRAWIN_ARM64/$TPL_SHA256_DRAWIN_ARM64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
-          # sed -i "s/SHA256_DRAWIN_AMD64/$TPL_SHA256_DRAWIN_AMD64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
-          # sed -i "s/SHA256_LINUX_ARM64/$TPL_SHA256_LINUX_ARM64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
-          # sed -i "s/SHA256_LINUX_AMD64/$TPL_SHA256_LINUX_AMD64/g" "$GITHUB_WORKSPACE/$TPL_NAME.rb"
-      - name: Create Pull Request to Homebrew Tap
+          sed -i \
+            -e "s/VERSION/$CLEAN_VERSION/g" \
+            -e "s/SHA256_DARWIN_ARM64/$SHA256_DARWIN_ARM64/g" \
+            -e "s/SHA256_DARWIN_AMD64/$SHA256_DARWIN_AMD64/g" \
+            -e "s/SHA256_LINUX_ARM64/$SHA256_LINUX_ARM64/g" \
+            -e "s/SHA256_LINUX_AMD64/$SHA256_LINUX_AMD64/g" \
+            formula-template.rb
+          
+          # 确保 Formula 目录存在
+          mkdir -p Formula
+          
+          # 移动文件到正确位置
+          mv formula-template.rb Formula/ttm.rb
+          
+          # 查看生成的内容
+          echo "生成的 Formula 内容:"
+          cat Formula/ttm.rb
+      
+      - name: Create Pull Request
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          branch: update-ttm-${{ github.event.release.tag_name }}
-          base: main 
-          repository: vst93/homebrew-tap
-          title: "Update ttm to ${{ github.event.release.tag_name }}"
+          branch: update-ttm-${GITHUB_REF#refs/tags/}
+          base: main
+          title: "Update ttm to ${GITHUB_REF#refs/tags/}"
           body: |
-            This PR updates the ttm formula to version ${{ github.event.release.tag_name }}.
+            This PR updates the ttm formula to version ${GITHUB_REF#refs/tags/}.
             SHA256 values have been automatically calculated for all platforms.
+            
             - **Release URL**: ${{ github.event.release.html_url }}
-          commit-message: "Update ttm to ${{ github.event.release.tag_name }}"
+            - **Platforms updated**:
+              - darwin-arm64
+              - darwin-amd64
+              - linux-arm64
+              - linux-amd64
+            
+            Auto-generated by GitHub Actions.
+          commit-message: "Update ttm to ${GITHUB_REF#refs/tags/}"
           labels: automated-pr, formula-update
-
