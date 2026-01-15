@@ -14,10 +14,7 @@ import (
 
 func main() {
 	server.AM.Init()
-	server.AM.BookmarkInfo.Init()
-	// Create a new program with a name and a startup function.
 	p := tea.NewProgram(&server.AM, tea.WithAltScreen())
-	// Run the program. This will block until the program exits.
 	if err := p.Start(); err != nil {
 		fmt.Println("Oh no, there was an error:", err)
 		os.Exit(1)

@@ -80,13 +80,6 @@ func (c *defaultClient) Login() error {
 		return err
 	}
 	defer client.Close()
-	defer func() {
-		// 清屏
-		// fmt.Println("\033[2J")
-		// 清屏且将光标置顶
-		fmt.Println("\033[2J\033[0;0H")
-		AM.View()
-	}()
 
 	session, err := client.NewSession()
 	if err != nil {
@@ -135,10 +128,12 @@ func (c *defaultClient) Login() error {
 	fmt.Println("\033[2J\033[0;0H")
 
 	// then callback
-	for i := range c.node.CallbackShells {
-		shell := c.node.CallbackShells[i]
-		time.Sleep(shell.Delay * time.Millisecond)
-		stdinPipe.Write([]byte(shell.Cmd + "\r"))
+	if c.node.CallbackShells != nil {
+		for i := range c.node.CallbackShells {
+			shell := c.node.CallbackShells[i]
+			time.Sleep(shell.Delay * time.Millisecond)
+			stdinPipe.Write([]byte(shell.Cmd + "\r"))
+		}
 	}
 
 	// change stdin to user
@@ -181,6 +176,16 @@ func (c *defaultClient) Login() error {
 	}()
 
 	session.Wait()
+
+	// SSH 会话结束，恢复终端状态
+	terminal.Restore(fd, state)
+
+	// 清屏并显示光标
+	fmt.Print("\033[2J\033[0;0H\033[?25h")
+
+	// 发送一个回车"唤醒" stdin，确保 TUI 能收到输入
+	fmt.Println()
+
 	return nil
 }
 
