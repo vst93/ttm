@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/muesli/cancelreader"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/terminal"
 )
@@ -53,9 +55,44 @@ type SSHConfig struct {
 	CallbackShells []*CallbackShell `yaml:"callback-shells"`
 }
 
+func isStdinCopyErrBenign(err error) bool {
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	return errors.Is(err, cancelreader.ErrCanceled)
+}
+
+func (c *defaultClient) ProbeConnection(timeout time.Duration) error {
+	host := c.node.Host
+	port := strconv.Itoa(c.node.Port)
+
+	cfg := *c.clientConfig
+	if timeout > 0 {
+		cfg.Timeout = timeout
+	}
+
+	client, err := ssh.Dial("tcp", net.JoinHostPort(host, port), &cfg)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+
+	return nil
+}
+
 func (c *defaultClient) Login() error {
 	host := c.node.Host
 	port := strconv.Itoa(c.node.Port)
+	fmt.Printf("%s\n", fmt.Sprintf(AM.t("connecting %s@%s:%s ...", "正在连接 %s@%s:%s ..."), c.clientConfig.User, host, port))
 
 	var client *ssh.Client
 	client, err := ssh.Dial("tcp", net.JoinHostPort(host, port), c.clientConfig)
@@ -124,9 +161,6 @@ func (c *defaultClient) Login() error {
 		return err
 	}
 
-	// 清屏且将光标置顶
-	fmt.Println("\033[2J\033[0;0H")
-
 	// then callback
 	if c.node.CallbackShells != nil {
 		for i := range c.node.CallbackShells {
@@ -136,9 +170,17 @@ func (c *defaultClient) Login() error {
 		}
 	}
 
+	stdinReader, err := cancelreader.NewReader(os.Stdin)
+	if err != nil {
+		return err
+	}
+	defer stdinReader.Close()
+
 	// change stdin to user
+	stdinCopyDone := make(chan error, 1)
 	go func() {
-		_, err = io.Copy(stdinPipe, os.Stdin)
+		_, copyErr := io.Copy(stdinPipe, stdinReader)
+		stdinCopyDone <- copyErr
 		session.Close()
 	}()
 
@@ -175,16 +217,21 @@ func (c *defaultClient) Login() error {
 		}
 	}()
 
-	session.Wait()
+	waitErr := session.Wait()
+	stdinReader.Cancel()
+	copyErr := <-stdinCopyDone
+	if !isStdinCopyErrBenign(copyErr) {
+		return copyErr
+	}
+	if waitErr != nil {
+		return waitErr
+	}
 
 	// SSH 会话结束，恢复终端状态
 	terminal.Restore(fd, state)
 
 	// 清屏并显示光标
 	fmt.Print("\033[2J\033[0;0H\033[?25h")
-
-	// 发送一个回车"唤醒" stdin，确保 TUI 能收到输入
-	fmt.Println()
 
 	return nil
 }
@@ -198,14 +245,17 @@ func genSSHConfig(node *SSHConfig) (*defaultClient, error) {
 	if node.PrivateKey != "" {
 		pemBytes = []byte(node.PrivateKey)
 	}
-	var signer ssh.Signer
-	if node.Passphrase != "" {
-		signer, err = ssh.ParsePrivateKeyWithPassphrase(pemBytes, []byte(node.Passphrase))
+	if len(pemBytes) > 0 {
+		var signer ssh.Signer
+		if node.Passphrase != "" {
+			signer, err = ssh.ParsePrivateKeyWithPassphrase(pemBytes, []byte(node.Passphrase))
+		} else {
+			signer, err = ssh.ParsePrivateKey(pemBytes)
+		}
 		if err != nil {
 			return nil, err
-		} else {
-			authMethods = append(authMethods, ssh.PublicKeys(signer))
 		}
+		authMethods = append(authMethods, ssh.PublicKeys(signer))
 	}
 
 	password := node.Password

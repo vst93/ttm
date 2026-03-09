@@ -13,6 +13,23 @@ type GistConfig struct {
 	Platform string `json:"platform"`
 	Token    string `json:"token"`
 	GistID   string `json:"gist_id"`
+	Locale   string `json:"locale"`
+}
+
+func SaveConfig(config GistConfig) error {
+	if ConfigFile == "" {
+		if err, _ := InitConfig(); err != nil {
+			return err
+		}
+	}
+	configStr, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("failed to encode config: %w", err)
+	}
+	if err := os.WriteFile(ConfigFile, configStr, 0644); err != nil {
+		return fmt.Errorf("failed to write config: %w", err)
+	}
+	return nil
 }
 
 func InitConfig() (error, GistConfig) {
@@ -34,6 +51,7 @@ func InitConfig() (error, GistConfig) {
 			Platform: "github",
 			Token:    "",
 			GistID:   "",
+			Locale:   "en",
 		}
 		configStr, _ := json.Marshal(config)
 		err = os.WriteFile(ConfigFile, configStr, 0644)

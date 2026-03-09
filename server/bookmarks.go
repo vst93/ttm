@@ -37,10 +37,10 @@ func (b *BookmarkInfo) Init() error {
 		if err == nil {
 			err = json.Unmarshal(configStr, &AM.BookmarkInfo.List)
 			if err != nil {
-				AM.TipString = "解析书签失败: " + err.Error()
+				AM.TipString = AM.t("failed to parse bookmarks: ", "解析书签失败: ") + err.Error()
 			}
 		} else {
-			AM.TipString = "读取书签失败: " + err.Error()
+			AM.TipString = AM.t("failed to read bookmarks: ", "读取书签失败: ") + err.Error()
 		}
 	}
 	return nil
