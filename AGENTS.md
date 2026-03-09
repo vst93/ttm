@@ -1,226 +1,173 @@
-# AGENTS.md - ttm Project Guidelines
+# AGENTS.md
 
-## Build, Lint, and Test Commands
+Operational guide for autonomous coding agents working in this repository.
 
-### Building
+## 1) Project Snapshot
+
+- Language: Go (`go 1.25.0`)
+- Module: `ttm`
+- Entry point: `main.go`
+- Core package: `server/`
+- UI stack: Bubble Tea + Bubbles + Lip Gloss
+- Key runtime behavior:
+  - TUI runs with `tea.WithAltScreen()`
+  - Global model singleton: `server.AM`
+  - Config stored via `os.UserConfigDir()` + `/ttm/config.json`
+
+## 2) Source Layout
+
+- `main.go` — program bootstrap
+- `server/app_model.go` — primary Bubble Tea model, key handling, overlays, locale
+- `server/config.go` — config read/write and path setup
+- `server/bookmarks.go` — bookmark file loading
+- `server/gist.go` — gist sync operations
+- `server/ssh.go` — SSH probe/login/session handling
+- `server/*_test.go` — tests
+
+## 3) Build / Lint / Test Commands
+
+Run from repo root: `/Users/vst/Code/goProgram/ttm`
+
+### Build
+
 ```bash
-# Standard build
 go build -o ttm .
-
-# Release build with optimizations (used in CI)
-go build -o ttm -trimpath -ldflags "-w -s" .
-
-# Cross-platform builds
-GOOS=darwin GOARCH=amd64 go build -o ttm-darwin-amd64 .
-GOOS=darwin GOARCH=arm64 go build -o ttm-darwin-arm64 .
-GOOS=linux GOARCH=amd64 go build -o ttm-linux-amd64 .
-GOOS=linux GOARCH=arm64 go build -o ttm-linux-arm64 .
-```
-
-### Linting and Formatting
-```bash
-# Format code (required before committing)
-go fmt ./...
-
-# Run static analysis
-go vet ./...
-
-# Check for issues
-go vet ./... 2>&1
-
-# Verify build without output
 go build -o /dev/null ./...
 ```
 
-### Testing
+### Format + Static Checks
+
 ```bash
-# Run all tests (no tests exist currently)
+go fmt ./...
+go vet ./...
+```
+
+### Full Verification Pipeline (preferred before completion)
+
+```bash
+go fmt ./... && go test ./... && go vet ./... && go build -o /dev/null ./...
+```
+
+### Tests
+
+```bash
+# all tests
 go test ./...
 
-# Run tests with verbose output
-go test -v ./...
+# package tests
+go test ./server
 
-# Run tests for specific package
-go test -v ./server/
+# verbose package tests
+go test -v ./server
 
-# Run tests matching pattern
-go test -run TestName ./...
+# single test by exact name
+go test ./server -run "^TestLanguageToggleWithLKey$" -count=1
 
-# Check test coverage
-go test -cover ./...
+# multiple specific tests
+go test ./server -run "TestA|TestB" -count=1
 ```
 
-### Dependency Management
-```bash
-# Download dependencies
-go mod download
+Notes:
+- Use `-count=1` when validating behavior sensitive to cache.
+- This repo currently has tests only under `server/`.
 
-# Tidy dependencies
-go mod tidy
+## 4) Coding Style Conventions
 
-# Verify dependencies
-go mod verify
-```
+### Imports
 
-## Code Style Guidelines
+- Keep Go standard grouping:
+  1. stdlib
+  2. third-party
+  3. local module imports
+- Let `go fmt` normalize ordering.
 
-### Import Organization
-- Group imports in this order:
-  1. Standard library packages
-  2. External/third-party packages
-  3. Blank imports (if any)
-- Use named imports (not `import .`)
+### Formatting
 
-```go
-import (
-    "encoding/json"
-    "fmt"
-    "os"
+- Always run `go fmt ./...` after edits.
+- Avoid manual alignment/spacing tweaks that fight `go fmt`.
 
-    "github.com/charmbracelet/bubbletea"
-    "golang.org/x/crypto/ssh"
-)
-```
+### Naming
 
-### Naming Conventions
-- **Packages**: lowercase, short, descriptive (e.g., `server`, `main`)
-- **Types**: PascalCase (e.g., `AppModel`, `SSHConfig`, `BookmarkItem`)
-- **Variables**: camelCase (e.g., `appModel`, `sshConfig`)
-- **Constants**: camelCase or UPPER_SNAKE_CASE for exported constants
-- **Functions**: PascalCase for exported, camelCase for unexported
-- **Interfaces**: typically one-method interfaces named with `-er` suffix (e.g., `Reader`, `Writer`)
-- **Receiver parameters**: short 1-2 letter names (e.g., `am`, `c`, `b`)
+- Exported identifiers: PascalCase (`AppModel`, `SaveConfig`)
+- Unexported identifiers: camelCase (`toggleLocale`, `applyListLocale`)
+- Constants/enums: existing style (`localeEN`, `tipInfo`) — follow local pattern.
+
+### Types and State
+
+- Reuse existing typed enums where present (e.g., `type locale int`, `type tipLevel int`).
+- Avoid introducing duplicate state sources; update existing model fields.
+- Keep `AppModel` as single source of UI state.
 
 ### Error Handling
-- **Never ignore errors**: Always check error returns explicitly
-- **Early returns**: Return errors immediately, avoid nested conditionals
-- **Error messages**: Use lowercase, no punctuation, descriptive
-- **Wrap errors**: Use `fmt.Errorf("context: %w", err)` for adding context
-- **No empty catch blocks**: Never use `if err != nil { /* empty */ }`
 
-```go
-// CORRECT
-if err != nil {
-    return err
-}
-return nil
-
-// CORRECT
-if err != nil {
-    return fmt.Errorf("failed to read config: %w", err)
-}
-
-// WRONG - never do this
-if err != nil {
-    // empty
-}
-```
-
-### Struct Design
-- Use struct tags for JSON/YAML serialization
-- Group related fields together
-- Use pointer receivers for methods that modify the struct
-- Embed structs for composition
-
-```go
-type AppModel struct {
-    GistConfig
-    BookmarkInfo
-    list      list.Model
-    TipString string
-}
-
-type BookmarkItem struct {
-    ID     string `json:"id"`
-    Title  string `json:"title"`
-    Host   string `json:"host"`
-    Port   int    `json:"port"`
-}
-```
-
-### Global Variables
-- Minimize global state where possible
-- Use package-level variables when necessary (follows existing pattern)
-- Document exported global variables
-
-```go
-var APP_DIR string
-var AM = AppModel{}  // Global app model instance
-```
-
-### TUI Patterns (bubbletea)
-- Follow MVC pattern: Model, Update, View
-- Use `tea.Cmd` for side effects
-- Handle messages in Update method with type switches
-- Keep View methods pure and fast
-
-```go
-func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-    switch msg := msg.(type) {
-    case tea.KeyMsg:
-        if msg.String() == "ctrl+c" {
-            return am, tea.Quit
-        }
-    case tea.WindowSizeMsg:
-        // Handle resize
-    }
-    return am, nil
-}
-```
+- Prefer explicit handling over silent discard.
+- Wrap with context when returning errors:
+  - `fmt.Errorf("failed to read config: %w", err)`
+- If intentionally ignoring an error, justify with code structure and ensure UX still safe.
 
 ### Comments
-- Use comments for exported identifiers (godoc style)
-- Chinese comments are acceptable (project uses mixed Chinese/English)
-- Comment non-obvious code logic
-- Keep comments concise and meaningful
 
-### File Organization
-- One package per directory (except `main` package)
-- Split related functionality into separate files
-- Use `_test.go` suffix for test files
-- Keep files focused and manageable size
+- Keep comments minimal and only for non-obvious logic.
+- Do not add narrative comments for straightforward code.
 
-### Code Quality Rules
-- **Never suppress errors**: No `// @ts-ignore` equivalents in Go
-- **No type assertions without checks**: Use comma-ok idiom
-- **No unused imports**: Run `go mod tidy` before committing
-- **Always defer resource cleanup**: Files, connections, sessions
+## 5) TUI / Bubble Tea Patterns
 
-### CI/CD Pipeline
-- GitHub Actions for releases on tag creation
-- Builds for: linux (amd64, arm64), darwin (amd64, arm64), windows (amd64)
-- Uses `trimpath` and `-ldflags "-w -s"` for release builds
-- Auto-updates Homebrew formula on release
+- Follow Bubble Tea loop discipline:
+  - state transitions in `Update`
+  - rendering in `View`
+  - side effects through `tea.Cmd`
+- Keep overlays width-safe (ANSI-aware width handling already exists).
+- For locale-aware UI text:
+  - use existing translation helper `am.t(en, zh)`
+  - call locale application hooks that update list title/help/status labels.
 
-### Project Structure
-```
-ttm/
-├── main.go          # Entry point
-├── server/          # Core TUI logic
-│   ├── app_model.go
-│   ├── bookmarks.go
-│   ├── config.go
-│   ├── gist.go
-│   └── ssh.go
-├── cmd/
-│   └── install.sh   # Installation script
-└── go.mod           # Go module definition
-```
+### Keyboard Handling
 
-### Module Information
-- Module name: `ttm`
-- Go version: 1.24.3
-- Key dependencies: bubbletea, lipgloss, bubbles, x/crypto/ssh
+- Existing language toggle is uppercase `L`.
+- When adding keybindings:
+  - update behavior in `Update`
+  - update help via `AdditionalShortHelpKeys` / `AdditionalFullHelpKeys`
+  - ensure locale-specific help labels are applied.
 
-### Common Patterns
-- SSH connection management with callbacks
-- JSON configuration file storage in `~/.config/ttm/`
-- Gist-based bookmark synchronization
-- Terminal-specific escape sequences for screen management
+### Pagination
 
-### Important Notes for Agents
-1. **Verify before committing**: Run `go fmt ./... && go vet ./... && go build .`
-2. **No breaking changes**: Don't modify public APIs without good reason
-3. **Cross-platform awareness**: Some code uses terminal-specific features (xterm, escape sequences)
-4. **Authentication**: Code handles SSH passwords and private keys - keep secure
-5. **Testing**: No test suite exists; write tests for new functionality
+- Pagination is enabled and localized via `Paginator.ArabicFormat`.
+- Keep explicit page indicators:
+  - EN: `Page %d/%d`
+  - ZH: `第%d/%d页`
+
+## 6) Config and Persistence
+
+- Config path uses `os.UserConfigDir()`:
+  - macOS: `~/Library/Application Support/ttm/config.json`
+  - Linux: `~/.config/ttm/config.json` (if XDG default)
+- Config struct: `GistConfig`
+- Persist changes via `SaveConfig(GistConfig)`.
+- Current persisted locale key: `locale` (`"en"` or `"zh"`).
+
+## 7) Testing Expectations for Agents
+
+- Add/adjust tests for behavior changes.
+- For locale features, verify:
+  - state toggles
+  - rendered help/footer text
+  - persisted config behavior
+- For UI alignment/overlay changes, assert ANSI width consistency (existing tests provide pattern).
+
+## 8) Git/Delivery Expectations
+
+- Do not commit unless explicitly asked.
+- Keep edits focused; avoid unrelated refactors.
+- Before declaring completion, run full verification pipeline.
+
+## 9) Cursor / Copilot Rules
+
+Searched locations:
+- `.cursor/rules/`
+- `.cursorrules`
+- `.github/copilot-instructions.md`
+
+Result:
+- No Cursor/Copilot rule files found in this repository at the time of writing.
+
+If such files are added later, update this section and prioritize repository-local rules.
