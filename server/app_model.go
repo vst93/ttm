@@ -107,6 +107,11 @@ type AppModel struct {
 	tipSeq        int
 	locale        locale
 	langToggleKey key.Binding
+	addKey        key.Binding
+	editKey       key.Binding
+	deleteKey     key.Binding
+	editor        *bookmarkEditor
+	pendingDelete *deleteConfirmState
 	isConnecting  bool
 	width         int
 	height        int
@@ -119,6 +124,18 @@ func (am *AppModel) Init() tea.Cmd {
 	_, am.GistConfig = InitConfig()
 	am.locale = localeEN
 	am.applyPersistedLocale()
+	am.addKey = key.NewBinding(
+		key.WithKeys("a"),
+		key.WithHelp("a", "add"),
+	)
+	am.editKey = key.NewBinding(
+		key.WithKeys("e"),
+		key.WithHelp("e", "edit"),
+	)
+	am.deleteKey = key.NewBinding(
+		key.WithKeys("d"),
+		key.WithHelp("d", "delete"),
+	)
 	am.langToggleKey = key.NewBinding(
 		key.WithKeys("L"),
 		key.WithHelp("L", "toggle language"),
@@ -172,6 +189,9 @@ func (am *AppModel) applyListLocale() {
 		am.list.SetStatusBarItemName("书签", "书签")
 		am.list.Paginator.Type = paginator.Arabic
 		am.list.Paginator.ArabicFormat = "第%d/%d页"
+		am.addKey.SetHelp("a", "新增")
+		am.editKey.SetHelp("e", "编辑")
+		am.deleteKey.SetHelp("d", "删除")
 		am.langToggleKey.SetHelp("L", "切换语言")
 		return
 	}
@@ -193,6 +213,9 @@ func (am *AppModel) applyListLocale() {
 	am.list.SetStatusBarItemName("bookmark", "bookmarks")
 	am.list.Paginator.Type = paginator.Arabic
 	am.list.Paginator.ArabicFormat = "Page %d/%d"
+	am.addKey.SetHelp("a", "add")
+	am.editKey.SetHelp("e", "edit")
+	am.deleteKey.SetHelp("d", "delete")
 	am.langToggleKey.SetHelp("L", "toggle language")
 }
 
@@ -232,10 +255,10 @@ func createListWithSelection(selectedIndex int) {
 	AM.list.StatusMessageLifetime = 2 * time.Second
 	AM.list.SetFilteringEnabled(true)
 	AM.list.AdditionalShortHelpKeys = func() []key.Binding {
-		return []key.Binding{AM.langToggleKey}
+		return []key.Binding{AM.addKey, AM.editKey, AM.deleteKey, AM.langToggleKey}
 	}
 	AM.list.AdditionalFullHelpKeys = func() []key.Binding {
-		return []key.Binding{AM.langToggleKey}
+		return []key.Binding{AM.addKey, AM.editKey, AM.deleteKey, AM.langToggleKey}
 	}
 	am := &AM
 	am.applyListLocale()
@@ -258,6 +281,10 @@ func createList() {
 }
 
 func authModeText(bookmark BookmarkItem) string {
+	authType := strings.TrimSpace(bookmark.AuthType)
+	if authType == "keyboard-interactive" {
+		return AM.t("interactive login (keyboard-interactive)", "交互登录 (keyboard-interactive)")
+	}
 	if strings.TrimSpace(bookmark.PrivateKey) != "" {
 		if strings.TrimSpace(bookmark.Passphrase) != "" {
 			return AM.t("private-key+passphrase (+ keyboard-interactive fallback)", "私钥+口令(含 keyboard-interactive 回退)")
@@ -329,6 +356,17 @@ func buildSSHClient(bookmark BookmarkItem, port int) (*defaultClient, error) {
 		CallbackShells: nil,
 	}
 	return genSSHConfig(sshConfig)
+}
+
+func needInteractiveConnect(bookmark BookmarkItem) bool {
+	authType := strings.TrimSpace(bookmark.AuthType)
+	if authType == "keyboard-interactive" {
+		return true
+	}
+	if authType == "password" || authType == "private-key" {
+		return false
+	}
+	return strings.TrimSpace(bookmark.Password) == "" && strings.TrimSpace(bookmark.PrivateKey) == ""
 }
 
 func connectExecCmd(sshClient *defaultClient, successTip, failurePrefix string) tea.Cmd {
@@ -520,10 +558,7 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case initMsg:
 		AM.BookmarkInfo.Init()
 		fmt.Print("\033[?25h")
-		// 立即创建列表，使用默认值
-		if len(AM.BookmarkInfo.List) > 0 {
-			createList()
-		}
+		createList()
 		return am, nil
 	case refreshMsg:
 		AM.BookmarkInfo.Init()
@@ -540,14 +575,31 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.String() == "ctrl+c" {
 			return am, tea.Quit
-		} else if msg.String() == "L" {
+		}
+
+		if AM.editor != nil {
+			return am, am.handleEditorKey(msg)
+		}
+
+		if AM.pendingDelete != nil {
+			return am, am.handleDeleteConfirmKey(msg)
+		}
+
+		isFiltering := am.list.FilterState() == list.Filtering
+		if !isFiltering && msg.String() == "L" {
 			am.toggleLocale()
 			am.applyListLocale()
 			if am.locale == localeZH {
 				return am, setTip("语言已切换为中文", tipInfo)
 			}
 			return am, setTip("language switched to English", tipInfo)
-		} else if msg.String() == "s" {
+		} else if !isFiltering && msg.String() == "a" {
+			return am, am.openAddBookmarkEditor()
+		} else if !isFiltering && msg.String() == "e" {
+			return am, am.openEditBookmarkEditor()
+		} else if !isFiltering && msg.String() == "d" {
+			return am, am.openDeleteBookmarkConfirm()
+		} else if !isFiltering && msg.String() == "s" {
 			if AM.Token == "" {
 				return am, setTip(am.t("please configure token first", "请先配置 token"), tipWarn)
 			}
@@ -581,15 +633,18 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			AM.isConnecting = true
 			tipCmd := setTip(fmt.Sprintf(am.t("connecting %s@%s:%d (%s)...", "正在连接 %s@%s:%d (%s)..."), bookmark.Username, bookmark.Host, port, authMode), tipProgress)
+			if needInteractiveConnect(bookmark) {
+				successTip := fmt.Sprintf(am.t("session closed %s@%s:%d (%s)", "会话结束 %s@%s:%d (%s)"), bookmark.Username, bookmark.Host, port, authMode)
+				failurePrefix := fmt.Sprintf(am.t("connection failed %s@%s:%d (%s): ", "连接失败 %s@%s:%d (%s): "), bookmark.Username, bookmark.Host, port, authMode)
+				return am, tea.Sequence(tipCmd, connectExecCmd(sshClient, successTip, failurePrefix))
+			}
 			return am, tea.Sequence(tipCmd, probeConnectCmd(sshClient, bookmark, port))
 		}
 	case tea.WindowSizeMsg:
 		selectedIndex := am.list.GlobalIndex()
 		AM.width = msg.Width
 		AM.height = msg.Height
-		if len(AM.BookmarkInfo.List) > 0 {
-			createListWithSelection(selectedIndex)
-		}
+		createListWithSelection(selectedIndex)
 	case connectResultMsg:
 		AM.isConnecting = false
 		var tipCmd tea.Cmd
@@ -625,7 +680,8 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (am *AppModel) View() string {
 	am.applyListLocale()
 	listView := am.list.View()
-	if strings.TrimSpace(am.TipString) == "" {
+	hasTip := strings.TrimSpace(am.TipString) != ""
+	if !hasTip && !AM.isConnecting && AM.editor == nil && AM.pendingDelete == nil {
 		return docStyle.Render(listView)
 	}
 	frameWidth, frameHeight := getListSize(AM.width, AM.height)
@@ -636,59 +692,70 @@ func (am *AppModel) View() string {
 		frameHeight = lipgloss.Height(listView)
 	}
 
-	maxTipWidth := frameWidth / 2
-	if maxTipWidth < 24 {
-		maxTipWidth = 24
-	}
-	if maxTipWidth > frameWidth-8 {
-		maxTipWidth = frameWidth - 8
-	}
-	if maxTipWidth < 16 {
-		maxTipWidth = 16
-	}
-	tipText := ansi.Truncate(AM.TipString, maxTipWidth, "…")
+	tipOverlay := ""
+	if hasTip {
+		maxTipWidth := frameWidth / 2
+		if maxTipWidth < 24 {
+			maxTipWidth = 24
+		}
+		if maxTipWidth > frameWidth-8 {
+			maxTipWidth = frameWidth - 8
+		}
+		if maxTipWidth < 16 {
+			maxTipWidth = 16
+		}
+		tipText := ansi.Truncate(AM.TipString, maxTipWidth, "…")
 
-	tipOverlay := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("248")).
-		Background(lipgloss.Color("238")).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("242")).
-		Padding(0, 0).
-		Render(tipText)
+		tipOverlay = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("248")).
+			Background(lipgloss.Color("238")).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("242")).
+			Padding(0, 0).
+			Render(tipText)
 
-	switch AM.tipLevel {
-	case tipSuccess:
-		tipOverlay = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("84")).
-			Background(lipgloss.Color("235")).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("70")).
-			Padding(0, 0).
-			Render(tipText)
-	case tipWarn:
-		tipOverlay = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("214")).
-			Background(lipgloss.Color("235")).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("208")).
-			Padding(0, 0).
-			Render(tipText)
-	case tipError:
-		tipOverlay = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("203")).
-			Background(lipgloss.Color("235")).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("196")).
-			Padding(0, 0).
-			Render(tipText)
-	case tipProgress:
-		tipOverlay = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("111")).
-			Background(lipgloss.Color("235")).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("110")).
-			Padding(0, 0).
-			Render("... " + tipText)
+		switch AM.tipLevel {
+		case tipSuccess:
+			tipOverlay = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("84")).
+				Background(lipgloss.Color("235")).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("70")).
+				Padding(0, 0).
+				Render(tipText)
+		case tipWarn:
+			tipOverlay = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("214")).
+				Background(lipgloss.Color("235")).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("208")).
+				Padding(0, 0).
+				Render(tipText)
+		case tipError:
+			tipOverlay = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("203")).
+				Background(lipgloss.Color("235")).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("196")).
+				Padding(0, 0).
+				Render(tipText)
+		case tipProgress:
+			tipOverlay = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("111")).
+				Background(lipgloss.Color("235")).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("110")).
+				Padding(0, 0).
+				Render("... " + tipText)
+		}
+	}
+
+	if AM.editor != nil {
+		view := am.buildEditorOverlay(frameWidth, frameHeight)
+		if tipOverlay != "" {
+			view = overlayTopRight(view, tipOverlay)
+		}
+		return docStyle.Render(view)
 	}
 
 	fullFrame := lipgloss.NewStyle().Width(frameWidth).Height(frameHeight).Render(listView)
@@ -698,6 +765,13 @@ func (am *AppModel) View() string {
 		overlayLayer := buildConnectingOverlay(frameWidth, frameHeight)
 		view = overlayCenter(dimmed, overlayLayer)
 	}
-	view = overlayTopRight(view, tipOverlay)
+	if AM.pendingDelete != nil {
+		dimmed := dimBaseForOverlay(view)
+		overlayLayer := am.buildDeleteConfirmOverlay(frameWidth)
+		view = overlayCenter(dimmed, overlayLayer)
+	}
+	if tipOverlay != "" {
+		view = overlayTopRight(view, tipOverlay)
+	}
 	return docStyle.Render(view)
 }

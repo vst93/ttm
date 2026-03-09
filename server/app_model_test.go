@@ -1,6 +1,8 @@
 package server
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -8,6 +10,13 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
+
+func setupBookmarkTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	APP_DIR = dir
+	return dir
+}
 
 func TestViewIncludesTipString(t *testing.T) {
 	AM = AppModel{}
@@ -241,6 +250,8 @@ func TestPaginationFormatIsExplicitInCurrentLocale(t *testing.T) {
 	AM = AppModel{}
 	am := &AM
 	am.Init()
+	AM.locale = localeEN
+	AM.GistConfig.Locale = "en"
 
 	AM.BookmarkInfo.List = make([]BookmarkItem, 35)
 	for i := range AM.BookmarkInfo.List {
@@ -824,5 +835,407 @@ func TestFullRenderPipelineWithRealList(t *testing.T) {
 					tc.width, tc.height, refWidth, len(lines))
 			}
 		})
+	}
+}
+
+func TestAddBookmarkWithCtrlSAddsItemAndPersists(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	bookmarkDir := setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:     "dev",
+		Host:      "10.0.0.1",
+		Username:  "root",
+		Port:      22,
+		EnableSSH: true,
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if AM.editor == nil {
+		t.Fatalf("expected add key to open bookmark editor")
+	}
+
+	AM.editor.inputs[editorFieldTitle].SetValue("new node")
+	AM.editor.inputs[editorFieldHost].SetValue("10.0.0.9")
+	AM.editor.inputs[editorFieldUsername].SetValue("ubuntu")
+	AM.editor.inputs[editorFieldPort].SetValue("2202")
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+
+	if AM.editor != nil {
+		t.Fatalf("expected editor to close after successful save")
+	}
+	if len(AM.BookmarkInfo.List) != 2 {
+		t.Fatalf("expected 2 bookmarks after add, got %d", len(AM.BookmarkInfo.List))
+	}
+	added := AM.BookmarkInfo.List[1]
+	if added.Host != "10.0.0.9" || added.Port != 2202 || added.Username != "ubuntu" {
+		t.Fatalf("unexpected added bookmark: %+v", added)
+	}
+
+	bookmarkFile := filepath.Join(bookmarkDir, "bookmarks.json")
+	data, err := os.ReadFile(bookmarkFile)
+	if err != nil {
+		t.Fatalf("expected bookmarks file to be written: %v", err)
+	}
+	if !strings.Contains(string(data), "\"host\":\"10.0.0.9\"") {
+		t.Fatalf("expected persisted bookmarks to include new host, got: %s", string(data))
+	}
+}
+
+func TestEditBookmarkKeepsMaskedSecretsWhenUnchanged(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		Password:   "old-password",
+		AuthType:   "password",
+		PrivateKey: "line1\nline2",
+		Passphrase: "old-passphrase",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if AM.editor == nil {
+		t.Fatalf("expected edit key to open bookmark editor")
+	}
+
+	AM.editor.inputs[editorFieldHost].SetValue("10.0.0.88")
+	AM.editor.inputs[editorFieldPassword].SetValue(maskedSecretValue)
+	AM.editor.inputs[editorFieldPrivateKey].SetValue(maskedSecretValue)
+	AM.editor.inputs[editorFieldPassphrase].SetValue(maskedSecretValue)
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+
+	updated := AM.BookmarkInfo.List[0]
+	if updated.Host != "10.0.0.88" {
+		t.Fatalf("expected host to be updated, got %q", updated.Host)
+	}
+	if updated.Password != "old-password" {
+		t.Fatalf("expected password to be preserved, got %q", updated.Password)
+	}
+	if updated.PrivateKey != "line1\nline2" {
+		t.Fatalf("expected private key to be preserved, got %q", updated.PrivateKey)
+	}
+	if updated.Passphrase != "old-passphrase" {
+		t.Fatalf("expected passphrase to be preserved, got %q", updated.Passphrase)
+	}
+}
+
+func TestDeleteBookmarkConfirmationRemovesSelectedItem(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{
+		{Title: "dev", Host: "10.0.0.1", Username: "root", Port: 22, EnableSSH: true},
+		{Title: "staging", Host: "10.0.0.2", Username: "root", Port: 22, EnableSSH: true},
+	}
+	AM.width = 100
+	AM.height = 30
+	createList()
+	AM.list.Select(1)
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if AM.pendingDelete == nil {
+		t.Fatalf("expected delete key to open confirmation modal")
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+
+	if AM.pendingDelete != nil {
+		t.Fatalf("expected delete confirmation to close after success")
+	}
+	if len(AM.BookmarkInfo.List) != 1 {
+		t.Fatalf("expected one bookmark after deletion, got %d", len(AM.BookmarkInfo.List))
+	}
+	if AM.BookmarkInfo.List[0].Host != "10.0.0.1" {
+		t.Fatalf("expected remaining bookmark to be first item, got %+v", AM.BookmarkInfo.List[0])
+	}
+}
+
+func TestAddBookmarkRejectsInvalidPortAndKeepsEditorOpen(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if AM.editor == nil {
+		t.Fatalf("expected add key to open editor")
+	}
+
+	AM.editor.inputs[editorFieldHost].SetValue("10.0.0.3")
+	AM.editor.inputs[editorFieldUsername].SetValue("root")
+	AM.editor.inputs[editorFieldPort].SetValue("abc")
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+
+	if AM.editor == nil {
+		t.Fatalf("expected editor to stay open when validation fails")
+	}
+	if len(AM.BookmarkInfo.List) != 0 {
+		t.Fatalf("expected no bookmark added on invalid port, got %d", len(AM.BookmarkInfo.List))
+	}
+	if !strings.Contains(strings.ToLower(AM.TipString), "port") {
+		t.Fatalf("expected validation tip to mention port, got %q", AM.TipString)
+	}
+}
+
+func TestEditorAuthModeSwitchShowsOnlyRelevantFields(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		Password:   "secret",
+		AuthType:   "password",
+		PrivateKey: "",
+	}}
+	AM.width = 90
+	AM.height = 24
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	view := am.View()
+	if !strings.Contains(view, "Password") {
+		t.Fatalf("expected password field in password mode")
+	}
+	if strings.Contains(view, "Private Key") {
+		t.Fatalf("expected private key field hidden in password mode")
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	view = am.View()
+	if !strings.Contains(view, "Private Key") || !strings.Contains(view, "Passphrase") {
+		t.Fatalf("expected key fields in private-key mode")
+	}
+	if strings.Contains(view, "Password") {
+		t.Fatalf("expected password field hidden in private-key mode")
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	view = am.View()
+	if strings.Contains(view, "Password") || strings.Contains(view, "Private Key") || strings.Contains(view, "Passphrase") {
+		t.Fatalf("expected secret fields hidden in keyboard-interactive mode")
+	}
+	if !strings.Contains(strings.ToLower(view), "keyboard-interactive") {
+		t.Fatalf("expected keyboard-interactive indicator in editor view")
+	}
+}
+
+func TestEditorKeyboardModeSaveClearsSecretFields(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		Password:   "secret",
+		AuthType:   "password",
+		PrivateKey: "PRIVATE KEY DATA",
+		Passphrase: "pp",
+	}}
+	AM.width = 90
+	AM.height = 24
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+
+	updated := AM.BookmarkInfo.List[0]
+	if updated.AuthType != "keyboard-interactive" {
+		t.Fatalf("expected auth type keyboard-interactive, got %q", updated.AuthType)
+	}
+	if updated.Password != "" || updated.PrivateKey != "" || updated.Passphrase != "" {
+		t.Fatalf("expected secrets cleared in keyboard-interactive mode, got %+v", updated)
+	}
+}
+
+func TestEditorSmallWindowUsesScrollableStableLayout(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:     "dev",
+		Host:      "10.0.0.1",
+		Username:  "root",
+		Port:      22,
+		EnableSSH: true,
+	}}
+	AM.width = 52
+	AM.height = 12
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+
+	_ = am.View()
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyHome})
+
+	view := am.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) == 0 {
+		t.Fatalf("expected non-empty editor view")
+	}
+	ref := ansi.StringWidth(lines[0])
+	for i, line := range lines {
+		if w := ansi.StringWidth(line); w != ref {
+			t.Fatalf("expected stable line widths in small editor view, line=%d width=%d ref=%d", i, w, ref)
+		}
+	}
+	if !strings.Contains(strings.ToLower(view), "switch") && !strings.Contains(view, "切换") {
+		t.Fatalf("expected auth switch hint to be visible in small window")
+	}
+	if !strings.Contains(strings.ToLower(view), "save") && !strings.Contains(view, "保存") {
+		t.Fatalf("expected editor help to remain visible in small window")
+	}
+}
+
+func TestNeedInteractiveConnectDetectsKeyboardInteractiveAuth(t *testing.T) {
+	AM = AppModel{}
+
+	tests := []struct {
+		name     string
+		bookmark BookmarkItem
+		want     bool
+	}{
+		{
+			name: "explicit keyboard interactive",
+			bookmark: BookmarkItem{
+				AuthType: "keyboard-interactive",
+			},
+			want: true,
+		},
+		{
+			name: "explicit password",
+			bookmark: BookmarkItem{
+				AuthType: "password",
+				Password: "secret",
+			},
+			want: false,
+		},
+		{
+			name: "explicit private key",
+			bookmark: BookmarkItem{
+				AuthType:   "private-key",
+				PrivateKey: "KEY",
+			},
+			want: false,
+		},
+		{
+			name: "legacy fallback no secrets",
+			bookmark: BookmarkItem{
+				AuthType: "",
+			},
+			want: true,
+		},
+		{
+			name: "legacy fallback with password",
+			bookmark: BookmarkItem{
+				AuthType:   "",
+				Password:   "legacy-password",
+				PrivateKey: "",
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := needInteractiveConnect(tc.bookmark)
+			if got != tc.want {
+				t.Fatalf("needInteractiveConnect(%+v) = %v, want %v", tc.bookmark, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNeedInteractiveConnectExplicitModes(t *testing.T) {
+	AM = AppModel{}
+	if !needInteractiveConnect(BookmarkItem{AuthType: "keyboard-interactive", Password: "", PrivateKey: ""}) {
+		t.Fatalf("expected interactive connect for keyboard-interactive auth type")
+	}
+	if needInteractiveConnect(BookmarkItem{AuthType: "password", Password: "secret"}) {
+		t.Fatalf("expected non-interactive connect for password auth type")
+	}
+	if needInteractiveConnect(BookmarkItem{AuthType: "private-key", PrivateKey: "KEY"}) {
+		t.Fatalf("expected non-interactive connect for private-key auth type")
+	}
+}
+
+func TestAuthModeTextShowsInteractiveLabelForKeyboardInteractive(t *testing.T) {
+	AM = AppModel{}
+
+	AM.locale = localeEN
+	en := authModeText(BookmarkItem{AuthType: "keyboard-interactive"})
+	if !strings.Contains(strings.ToLower(en), "interactive login") {
+		t.Fatalf("expected english auth mode text to mention interactive login, got %q", en)
+	}
+
+	AM.locale = localeZH
+	zh := authModeText(BookmarkItem{AuthType: "keyboard-interactive"})
+	if !strings.Contains(zh, "交互登录") {
+		t.Fatalf("expected chinese auth mode text to mention 交互登录, got %q", zh)
+	}
+}
+
+func TestEditorViewUsesPageStyleWithoutInverseOrBoxArtifacts(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:     "dev",
+		Host:      "10.0.0.1",
+		Username:  "root",
+		Port:      22,
+		EnableSSH: true,
+	}}
+	AM.width = 90
+	AM.height = 20
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	view := am.View()
+
+	if strings.Contains(view, "\x1b[7m") {
+		t.Fatalf("expected editor view not to use inverse video cursor blocks")
+	}
+	if strings.Contains(view, "\x1b[48;") {
+		t.Fatalf("expected editor view not to force background color fills")
+	}
+	if strings.ContainsAny(view, "╭╮╰╯│") {
+		t.Fatalf("expected editor page style without modal box border artifacts")
 	}
 }

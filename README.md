@@ -1,4 +1,4 @@
-# ttm
+# TTM
 
 TUI Terminal Manager - SSH bookmark manager with Gist sync.
 
