@@ -50,7 +50,8 @@ jobs:
           if [ "$GOOS" == "android" ]; then declare -A goarch2cc=( ["arm64"]="aarch64-linux-android32-clang" ["arm"]="armv7a-linux-androideabi32-clang" ["amd64"]="x86_64-linux-android32-clang" ["386"]="i686-linux-android32-clang"); export CC="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${goarch2cc[$GOARCH]}"; fi
           export BINARY_NAME="$BINARY_PREFIX$BINARY_SUFFIX"
           export CGO_ENABLED=$( [ "$GOOS" == "android" ] && echo 1 || echo 0 )
-          go build -o "$GITHUB_WORKSPACE/output/$BINARY_NAME" -trimpath -ldflags "$LD_FLAGS" .
+          VERSION="${GITHUB_REF#refs/tags/}"
+          go build -o "$GITHUB_WORKSPACE/output/$BINARY_NAME" -trimpath -ldflags "$LD_FLAGS -X ttm/server.Version=$VERSION" .
           
           cd "$GITHUB_WORKSPACE/output"
           ZIP_NAME="$BINARY_PREFIX-$GOOS-$GOARCH.zip"

@@ -5,55 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
+	"time"
 )
 
 type GistResponseItem struct {
-	URL         string                          `json:"url"`
-	ForksURL    string                          `json:"forks_url"`
-	CommitsURL  string                          `json:"commits_url"`
-	ID          string                          `json:"id"`
-	Description string                          `json:"description"`
-	Public      bool                            `json:"public"`
-	Owner       GistResponseItemOwner           `json:"owner"`
-	User        GistResponseItemOwner           `json:"user"`
-	Files       map[string]GistResponseItemFile `json:"files"`
-	Truncated   bool                            `json:"truncated"`
-	HTMLURL     string                          `json:"html_url"`
-	Comments    int64                           `json:"comments"`
-	CommentsURL string                          `json:"comments_url"`
-	GitPullURL  string                          `json:"git_pull_url"`
-	GitPushURL  string                          `json:"git_push_url"`
-	CreatedAt   string                          `json:"created_at"`
-	UpdatedAt   string                          `json:"updated_at"`
-}
-
-type GistResponseItemOwner struct {
-	ID                int64  `json:"id"`
-	Login             string `json:"login"`
-	Name              string `json:"name"`
-	AvatarURL         string `json:"avatar_url"`
-	URL               string `json:"url"`
-	HTMLURL           string `json:"html_url"`
-	Remark            string `json:"remark"`
-	FollowersURL      string `json:"followers_url"`
-	FollowingURL      string `json:"following_url"`
-	GistsURL          string `json:"gists_url"`
-	StarredURL        string `json:"starred_url"`
-	SubscriptionsURL  string `json:"subscriptions_url"`
-	OrganizationsURL  string `json:"organizations_url"`
-	ReposURL          string `json:"repos_url"`
-	EventsURL         string `json:"events_url"`
-	ReceivedEventsURL string `json:"received_events_url"`
-	Type              string `json:"type"`
+	ID    string                          `json:"id"`
+	Files map[string]GistResponseItemFile `json:"files"`
 }
 
 type GistResponseItemFile struct {
-	Size      int64  `json:"size"`
-	RawURL    string `json:"raw_url"`
-	Type      string `json:"type"`
-	Truncated bool   `json:"truncated"`
-	Content   string `json:"content"`
+	Content string `json:"content"`
 }
 
 type GistCreateRequest struct {
@@ -66,50 +27,80 @@ type GistFileData struct {
 	Content string `json:"content"`
 }
 
+var gistHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
+func gistRequest(method, url string, body []byte) (*http.Response, error) {
+	var req *http.Request
+	var err error
+	if body != nil {
+		req, err = http.NewRequest(method, url, bytes.NewReader(body))
+	} else {
+		req, err = http.NewRequest(method, url, nil)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if AM.Platform == "gitee" {
+		req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+	} else {
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+AM.Token)
+		req.Header.Set("Accept", "application/vnd.github+json")
+	}
+
+	return gistHTTPClient.Do(req)
+}
+
 func getAPIURL(path string) string {
 	if AM.Platform == "gitee" {
 		return "https://gitee.com/api/v5" + path + "?access_token=" + AM.Token
 	}
-	return "https://api.github.com" + path + "?access_token=" + AM.Token
+	return "https://api.github.com" + path
 }
 
 func GetGist() error {
 	if AM.Token == "" {
 		return fmt.Errorf("access token is empty")
 	}
-	apiUrl := getAPIURL("/gists")
-	result, err := http.Get(apiUrl)
+	if AM.GistID == "" {
+		return fmt.Errorf("gist_id is empty")
+	}
+
+	apiURL := getAPIURL("/gists/" + AM.GistID)
+	resp, err := gistRequest("GET", apiURL, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("request failed: %w", err)
 	}
-	defer result.Body.Close()
-	if result.StatusCode != 200 {
-		return fmt.Errorf("get gist list failed, status code: %d", result.StatusCode)
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 404 {
+		return fmt.Errorf("gist not found, check gist_id")
 	}
-	gistList := []GistResponseItem{}
-	err = json.NewDecoder(result.Body).Decode(&gistList)
-	if err != nil {
-		return err
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return fmt.Errorf("auth failed, check token")
 	}
-	for _, gist := range gistList {
-		if gist.ID == AM.GistID {
-			files := gist.Files
-			for fileName, file := range files {
-				if strings.HasSuffix(fileName, ".json") || fileName == "bookmarks.json" {
-					var Bookmarks []BookmarkItem
-					bookmarkStr := file.Content
-					err = json.Unmarshal([]byte(bookmarkStr), &Bookmarks)
-					if err != nil {
-						return err
-					}
-					AM.BookmarkInfo.List = Bookmarks
-					return nil
-				}
-			}
-			break
-		}
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("get gist failed, status: %d", resp.StatusCode)
 	}
-	return fmt.Errorf("gist not found")
+
+	var gist GistResponseItem
+	if err := json.NewDecoder(resp.Body).Decode(&gist); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	file, ok := gist.Files["bookmarks.json"]
+	if !ok {
+		return fmt.Errorf("bookmarks.json not found in gist")
+	}
+
+	var bookmarks []BookmarkItem
+	if err := json.Unmarshal([]byte(file.Content), &bookmarks); err != nil {
+		return fmt.Errorf("failed to parse bookmarks: %w", err)
+	}
+
+	AM.BookmarkInfo.List = bookmarks
+	return nil
 }
 
 func UploadGist() error {
@@ -117,15 +108,13 @@ func UploadGist() error {
 		return fmt.Errorf("access token is empty")
 	}
 
-	bookmarksJSON, err := json.Marshal(AM.BookmarkInfo.List)
+	bookmarksJSON, err := json.MarshalIndent(AM.BookmarkInfo.List, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal bookmarks: %w", err)
 	}
 
 	gistFiles := map[string]GistFileData{
-		"bookmarks.json": {
-			Content: string(bookmarksJSON),
-		},
+		"bookmarks.json": {Content: string(bookmarksJSON)},
 	}
 
 	gistRequest := GistCreateRequest{
@@ -139,36 +128,40 @@ func UploadGist() error {
 		return fmt.Errorf("failed to encode request: %w", err)
 	}
 
-	var apiUrl string
+	var apiURL string
 	var httpMethod string
 
 	if AM.GistID == "" {
-		apiUrl = getAPIURL("/gists")
+		apiURL = getAPIURL("/gists")
 		httpMethod = "POST"
 	} else {
-		apiUrl = getAPIURL("/gists/" + AM.GistID)
+		apiURL = getAPIURL("/gists/" + AM.GistID)
 		httpMethod = "PATCH"
 	}
 
-	req, err := http.NewRequest(httpMethod, apiUrl, bytes.NewReader(requestBody))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	if AM.Platform == "gitee" {
-		req.Header.Set("Content-Type", "application/json;charset=UTF-8")
-	}
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := gistHTTPClient.Do(func() *http.Request {
+		var req *http.Request
+		if AM.Platform == "gitee" {
+			req, _ = http.NewRequest(httpMethod, apiURL, bytes.NewReader(requestBody))
+			req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+		} else {
+			req, _ = http.NewRequest(httpMethod, apiURL, bytes.NewReader(requestBody))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+AM.Token)
+			req.Header.Set("Accept", "application/vnd.github+json")
+		}
+		return req
+	}())
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return fmt.Errorf("auth failed, check token")
+	}
 	if resp.StatusCode != 200 && resp.StatusCode != 201 {
-		return fmt.Errorf("upload gist failed, status code: %d", resp.StatusCode)
+		return fmt.Errorf("upload failed, status: %d", resp.StatusCode)
 	}
 
 	var gistResponse GistResponseItem

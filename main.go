@@ -1,9 +1,5 @@
 package main
 
-// These imports will be used later on the tutorial. If you save the file
-// now, Go might complain they are unused, but that's fine.
-// You may also need to run `go mod tidy` to download bubbletea and its
-// dependencies.
 import (
 	"fmt"
 	"os"
@@ -13,6 +9,11 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
+		fmt.Printf("ttm %s\n", server.Version)
+		return
+	}
+
 	server.AM.Init()
 	p := tea.NewProgram(&server.AM, tea.WithAltScreen())
 	if err := p.Start(); err != nil {

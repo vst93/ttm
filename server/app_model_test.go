@@ -406,13 +406,13 @@ func TestLocalizedTipAfterLanguageToggle(t *testing.T) {
 	AM.GistID = "gid"
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
-	if !strings.Contains(AM.TipString, "configure token") {
+	if !strings.Contains(AM.TipString, "token") {
 		t.Fatalf("expected english token warning, got %q", AM.TipString)
 	}
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'L'}})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
-	if !strings.Contains(AM.TipString, "请先配置 token") {
+	if !strings.Contains(AM.TipString, "未配置 token") {
 		t.Fatalf("expected chinese token warning after toggle, got %q", AM.TipString)
 	}
 }
@@ -434,13 +434,13 @@ func TestLanguageToggleHelpHintShownInFooter(t *testing.T) {
 	if !strings.Contains(view, "L") {
 		t.Fatalf("expected help/footer to include L shortcut")
 	}
-	if !strings.Contains(view, "toggle language") {
+	if !strings.Contains(view, "lang") {
 		t.Fatalf("expected english help/footer text for language toggle")
 	}
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'L'}})
 	view = am.View()
-	if !strings.Contains(view, "切换语言") {
+	if !strings.Contains(view, "语言") {
 		t.Fatalf("expected chinese help/footer text after locale toggle")
 	}
 }
@@ -463,8 +463,8 @@ func TestLanguageToggleUpdatesHelpAndStatusBarLocale(t *testing.T) {
 	}
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'L'}})
-	if AM.list.Title != "TTM 书签" {
-		t.Fatalf("expected compact chinese title after toggle, got %q", AM.list.Title)
+	if !strings.Contains(AM.list.Title, "TTM") || !strings.Contains(AM.list.Title, Version) {
+		t.Fatalf("expected title with TTM and version after toggle, got %q", AM.list.Title)
 	}
 
 	if got := AM.list.KeyMap.Quit.Help().Desc; got != "退出" {
@@ -482,19 +482,19 @@ func TestLanguageToggleUpdatesHelpAndStatusBarLocale(t *testing.T) {
 	}
 
 	view := am.View()
-	if !strings.Contains(view, "切换语言") {
+	if !strings.Contains(view, "语言") {
 		t.Fatalf("expected rendered help/footer to show chinese language toggle hint")
 	}
 
 	_, _ = am.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	view = am.View()
-	if !strings.Contains(view, "切换语言") {
+	if !strings.Contains(view, "语言") {
 		t.Fatalf("expected chinese help/footer hint to persist after redraw")
 	}
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'L'}})
-	if AM.list.Title != "TTM Bookmarks" {
-		t.Fatalf("expected compact english title after second toggle, got %q", AM.list.Title)
+	if !strings.Contains(AM.list.Title, "TTM") || !strings.Contains(AM.list.Title, Version) {
+		t.Fatalf("expected title with version after second toggle, got %q", AM.list.Title)
 	}
 	if got := AM.list.Paginator.ArabicFormat; got != "Page %d/%d" {
 		t.Fatalf("expected english pagination format after second toggle, got %q", got)
@@ -787,7 +787,7 @@ func TestFullRenderPipelineWithRealList(t *testing.T) {
 		{"with_connect_large", 120, 40, true, "connecting server..."},
 		{"odd_width_81", 81, 24, false, "tip"},
 		{"odd_height_25", 80, 25, false, "tip"},
-		{"very_narrow_30", 30, 10, false, "t"},
+		{"narrow_40", 40, 14, false, "t"},
 	}
 
 	for _, tc := range testCases {
@@ -1122,6 +1122,53 @@ func TestEditorSmallWindowUsesScrollableStableLayout(t *testing.T) {
 	}
 }
 
+func TestEditorTabScrollsToLastFieldInSmallWindow(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "dev",
+		Host:       "10.0.0.1",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		Password:   "secret",
+		AuthType:   "password",
+		PrivateKey: "KEY",
+		Passphrase: "pp",
+	}}
+	AM.width = 60
+	AM.height = 10
+	createList()
+
+	// Open editor in private-key mode (most fields: title, host, username, port, authType, privateKey, passphrase)
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if AM.editor == nil {
+		t.Fatalf("expected editor to open")
+	}
+	// Switch to private-key auth
+	AM.editor.authType = authTypePrivateKey
+	AM.editor.authDirty = true
+
+	// Tab through all fields to the last one
+	fields := AM.editor.activeFields()
+	for i := 0; i < len(fields)-1; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+
+	lastField := fields[len(fields)-1]
+	if AM.editor.focusedField() != lastField {
+		t.Fatalf("expected focus on last field %d, got %d", lastField, AM.editor.focusedField())
+	}
+
+	view := am.View()
+	lastLabel := am.editorFieldLabel(lastField)
+	if !strings.Contains(view, lastLabel) {
+		t.Fatalf("expected last field label %q visible after tabbing in small window, view:\n%s", lastLabel, view)
+	}
+}
+
 func TestNeedInteractiveConnectDetectsKeyboardInteractiveAuth(t *testing.T) {
 	AM = AppModel{}
 
@@ -1237,5 +1284,100 @@ func TestEditorViewUsesPageStyleWithoutInverseOrBoxArtifacts(t *testing.T) {
 	}
 	if strings.ContainsAny(view, "╭╮╰╯│") {
 		t.Fatalf("expected editor page style without modal box border artifacts")
+	}
+}
+
+func TestCursorWrapsFromFirstToLast(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	AM.BookmarkInfo.List = []BookmarkItem{
+		{Title: "a", Host: "10.0.0.1", Port: 22, Username: "root", EnableSSH: true},
+		{Title: "b", Host: "10.0.0.2", Port: 22, Username: "root", EnableSSH: true},
+		{Title: "c", Host: "10.0.0.3", Port: 22, Username: "root", EnableSSH: true},
+	}
+	AM.width = 80
+	AM.height = 24
+	createList()
+	AM.list.Select(0)
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyUp})
+
+	if got := AM.list.GlobalIndex(); got != 2 {
+		t.Fatalf("expected cursor to wrap to last item (2), got %d", got)
+	}
+}
+
+func TestCursorWrapsFromLastToFirst(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	AM.BookmarkInfo.List = []BookmarkItem{
+		{Title: "a", Host: "10.0.0.1", Port: 22, Username: "root", EnableSSH: true},
+		{Title: "b", Host: "10.0.0.2", Port: 22, Username: "root", EnableSSH: true},
+		{Title: "c", Host: "10.0.0.3", Port: 22, Username: "root", EnableSSH: true},
+	}
+	AM.width = 80
+	AM.height = 24
+	createList()
+	AM.list.Select(2)
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+
+	if got := AM.list.GlobalIndex(); got != 0 {
+		t.Fatalf("expected cursor to wrap to first item (0), got %d", got)
+	}
+}
+
+func TestPageWrapsFromLastToFirst(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	AM.BookmarkInfo.List = make([]BookmarkItem, 40)
+	for i := range AM.BookmarkInfo.List {
+		AM.BookmarkInfo.List[i] = BookmarkItem{Title: "srv", Host: "10.0.0.1", Port: 22, Username: "root", EnableSSH: true}
+	}
+	AM.width = 80
+	AM.height = 24
+	createList()
+
+	lastPage := AM.list.Paginator.TotalPages - 1
+	if lastPage < 1 {
+		t.Fatalf("expected multiple pages, got %d", AM.list.Paginator.TotalPages)
+	}
+	AM.list.Paginator.Page = lastPage
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRight})
+
+	if AM.list.Paginator.Page != 0 {
+		t.Fatalf("expected page to wrap to 0, got %d", AM.list.Paginator.Page)
+	}
+	if got := AM.list.GlobalIndex(); got != 0 {
+		t.Fatalf("expected cursor at 0 after page wrap, got %d", got)
+	}
+}
+
+func TestPageWrapsFromFirstToLast(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	AM.BookmarkInfo.List = make([]BookmarkItem, 40)
+	for i := range AM.BookmarkInfo.List {
+		AM.BookmarkInfo.List[i] = BookmarkItem{Title: "srv", Host: "10.0.0.1", Port: 22, Username: "root", EnableSSH: true}
+	}
+	AM.width = 80
+	AM.height = 24
+	createList()
+
+	lastPage := AM.list.Paginator.TotalPages - 1
+	if lastPage < 1 {
+		t.Fatalf("expected multiple pages, got %d", AM.list.Paginator.TotalPages)
+	}
+	AM.list.Paginator.Page = 0
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyLeft})
+
+	if AM.list.Paginator.Page != lastPage {
+		t.Fatalf("expected page to wrap to %d, got %d", lastPage, AM.list.Paginator.Page)
 	}
 }

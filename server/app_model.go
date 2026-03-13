@@ -55,6 +55,16 @@ type clearTipMsg struct {
 	Seq int
 }
 
+type syncUploadMsg struct {
+	Err    error
+	GistID string
+}
+
+type syncDownloadMsg struct {
+	Err       error
+	Bookmarks []BookmarkItem
+}
+
 type tipLevel int
 
 type locale int
@@ -87,15 +97,84 @@ func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list
 		return
 	}
 
-	str := fmt.Sprintf("%02d %s", index+1, i)
+	text := string(i)
+	num := fmt.Sprintf("%2d", index+1)
+	title := text
+	detail := ""
+	if idx := strings.Index(text, " · "); idx >= 0 {
+		title = text[:idx]
+		detail = text[idx+len(" · "):]
+	}
 
-	fn := lipgloss.NewStyle().PaddingLeft(1).Foreground(lipgloss.Color("250")).Render
-	if index == m.Index() {
-		fn = func(s ...string) string {
-			return lipgloss.NewStyle().PaddingLeft(0).Foreground(lipgloss.Color("111")).Bold(true).Render("> " + strings.Join(s, " "))
+	starred := false
+	if after, found := strings.CutPrefix(title, "★ "); found {
+		title = after
+		starred = true
+	}
+
+	selected := index == m.Index()
+	detailRendered := ""
+	if detail != "" {
+		detailRendered = renderDetail(detail, selected)
+	}
+
+	dimSep := lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render("│")
+
+	starBadge := ""
+	if starred {
+		if selected {
+			starBadge = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Render("★") + " "
+		} else {
+			starBadge = lipgloss.NewStyle().Foreground(lipgloss.Color("172")).Render("★") + " "
 		}
 	}
-	fmt.Fprint(w, fn(str))
+
+	if selected {
+		indicator := lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true).Render("▸ ")
+		numStr := lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(num)
+		titleStr := lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true).Render(title)
+		line := indicator + numStr + " " + starBadge + titleStr
+		if detailRendered != "" {
+			line += " " + dimSep + " " + detailRendered
+		}
+		fmt.Fprint(w, line)
+	} else {
+		numStr := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(num)
+		titleStr := lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Render(title)
+		line := "  " + numStr + " " + starBadge + titleStr
+		if detailRendered != "" {
+			line += " " + dimSep + " " + detailRendered
+		}
+		fmt.Fprint(w, line)
+	}
+}
+
+func renderDetail(detail string, selected bool) string {
+	// Parse user@host:port
+	user, rest := detail, ""
+	if at := strings.Index(detail, "@"); at >= 0 {
+		user = detail[:at]
+		rest = detail[at+1:]
+	} else {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(detail)
+	}
+	host, port := rest, ""
+	if colon := strings.LastIndex(rest, ":"); colon >= 0 {
+		host = rest[:colon]
+		port = rest[colon+1:]
+	}
+	if selected {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("109")).Render(user) +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("@") +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(host) +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(":") +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("109")).Render(port)
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(user) +
+		lipgloss.NewStyle().Foreground(lipgloss.Color("239")).Render("@") +
+		lipgloss.NewStyle().Foreground(lipgloss.Color("247")).Render(host) +
+		lipgloss.NewStyle().Foreground(lipgloss.Color("239")).Render(":") +
+		lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(port)
 }
 
 type AppModel struct {
@@ -106,14 +185,22 @@ type AppModel struct {
 	tipLevel      tipLevel
 	tipSeq        int
 	locale        locale
-	langToggleKey key.Binding
+	connectKey    key.Binding
+	syncKey       key.Binding
 	addKey        key.Binding
 	editKey       key.Binding
 	deleteKey     key.Binding
+	starKey       key.Binding
+	configKey     key.Binding
+	updateKey     key.Binding
+	langToggleKey key.Binding
 	editor        *bookmarkEditor
+	configEditor  *configEditor
 	pendingDelete *deleteConfirmState
-	isConnecting  bool
-	width         int
+	isConnecting bool
+	isUpdating   bool
+	isSyncing    bool
+	width        int
 	height        int
 }
 
@@ -124,6 +211,14 @@ func (am *AppModel) Init() tea.Cmd {
 	_, am.GistConfig = InitConfig()
 	am.locale = localeEN
 	am.applyPersistedLocale()
+	am.connectKey = key.NewBinding(
+		key.WithKeys("enter"),
+		key.WithHelp("⏎", "connect"),
+	)
+	am.syncKey = key.NewBinding(
+		key.WithKeys("s"),
+		key.WithHelp("s/S", "push/pull"),
+	)
 	am.addKey = key.NewBinding(
 		key.WithKeys("a"),
 		key.WithHelp("a", "add"),
@@ -136,9 +231,21 @@ func (am *AppModel) Init() tea.Cmd {
 		key.WithKeys("d"),
 		key.WithHelp("d", "delete"),
 	)
+	am.starKey = key.NewBinding(
+		key.WithKeys("*"),
+		key.WithHelp("*", "star"),
+	)
+	am.configKey = key.NewBinding(
+		key.WithKeys("c"),
+		key.WithHelp("c", "config"),
+	)
+	am.updateKey = key.NewBinding(
+		key.WithKeys("u"),
+		key.WithHelp("u", "update"),
+	)
 	am.langToggleKey = key.NewBinding(
 		key.WithKeys("L"),
-		key.WithHelp("L", "toggle language"),
+		key.WithHelp("L", "lang"),
 	)
 	return func() tea.Msg { return initMsg{} }
 }
@@ -148,6 +255,26 @@ func (am *AppModel) t(en, zh string) string {
 		return zh
 	}
 	return en
+}
+
+func (am *AppModel) checkSyncConfig() tea.Cmd {
+	if AM.Token == "" {
+		return setTip(am.t(
+			"token not configured, press c to open config",
+			"未配置 token，按 c 打开配置",
+		), tipWarn)
+	}
+	if AM.GistID == "" {
+		return setTip(am.t(
+			"gist_id not configured, press c to open config",
+			"未配置 gist_id，按 c 打开配置",
+		), tipWarn)
+	}
+	return nil
+}
+
+func (am *AppModel) refreshList() {
+	createList()
 }
 
 func (am *AppModel) toggleLocale() {
@@ -172,37 +299,42 @@ func (am *AppModel) applyPersistedLocale() {
 
 func (am *AppModel) applyListLocale() {
 	if am.locale == localeZH {
-		am.list.Title = "TTM 书签"
+		am.list.Title = "TTM " + lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(Version)
 		am.list.KeyMap.CursorUp.SetHelp("↑/k", "上移")
 		am.list.KeyMap.CursorDown.SetHelp("↓/j", "下移")
-		am.list.KeyMap.PrevPage.SetHelp("←/h/pgup", "上一页")
-		am.list.KeyMap.NextPage.SetHelp("→/l/pgdn", "下一页")
-		am.list.KeyMap.GoToStart.SetHelp("g/home", "到开头")
-		am.list.KeyMap.GoToEnd.SetHelp("G/end", "到结尾")
+		am.list.KeyMap.PrevPage.SetHelp("←/h", "上一页")
+		am.list.KeyMap.NextPage.SetHelp("→/l", "下一页")
+		am.list.KeyMap.GoToStart.SetHelp("g", "到开头")
+		am.list.KeyMap.GoToEnd.SetHelp("G", "到结尾")
 		am.list.KeyMap.Filter.SetHelp("/", "过滤")
 		am.list.KeyMap.ClearFilter.SetHelp("esc", "清除过滤")
 		am.list.KeyMap.CancelWhileFiltering.SetHelp("esc", "取消")
 		am.list.KeyMap.AcceptWhileFiltering.SetHelp("enter", "应用过滤")
 		am.list.KeyMap.ShowFullHelp.SetHelp("?", "更多")
-		am.list.KeyMap.CloseFullHelp.SetHelp("?", "关闭帮助")
+		am.list.KeyMap.CloseFullHelp.SetHelp("?", "收起")
 		am.list.KeyMap.Quit.SetHelp("q", "退出")
 		am.list.SetStatusBarItemName("书签", "书签")
 		am.list.Paginator.Type = paginator.Arabic
 		am.list.Paginator.ArabicFormat = "第%d/%d页"
+		am.connectKey.SetHelp("⏎", "连接")
+		am.syncKey.SetHelp("s/S", "推送/拉取")
 		am.addKey.SetHelp("a", "新增")
 		am.editKey.SetHelp("e", "编辑")
 		am.deleteKey.SetHelp("d", "删除")
-		am.langToggleKey.SetHelp("L", "切换语言")
+		am.starKey.SetHelp("*", "标星")
+		am.configKey.SetHelp("c", "配置")
+		am.updateKey.SetHelp("u", "更新")
+		am.langToggleKey.SetHelp("L", "语言")
 		return
 	}
 
-	am.list.Title = "TTM Bookmarks"
+	am.list.Title = "TTM " + lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(Version)
 	am.list.KeyMap.CursorUp.SetHelp("↑/k", "up")
 	am.list.KeyMap.CursorDown.SetHelp("↓/j", "down")
-	am.list.KeyMap.PrevPage.SetHelp("←/h/pgup", "prev page")
-	am.list.KeyMap.NextPage.SetHelp("→/l/pgdn", "next page")
-	am.list.KeyMap.GoToStart.SetHelp("g/home", "go to start")
-	am.list.KeyMap.GoToEnd.SetHelp("G/end", "go to end")
+	am.list.KeyMap.PrevPage.SetHelp("←/h", "prev page")
+	am.list.KeyMap.NextPage.SetHelp("→/l", "next page")
+	am.list.KeyMap.GoToStart.SetHelp("g", "start")
+	am.list.KeyMap.GoToEnd.SetHelp("G", "end")
 	am.list.KeyMap.Filter.SetHelp("/", "filter")
 	am.list.KeyMap.ClearFilter.SetHelp("esc", "clear filter")
 	am.list.KeyMap.CancelWhileFiltering.SetHelp("esc", "cancel")
@@ -213,10 +345,15 @@ func (am *AppModel) applyListLocale() {
 	am.list.SetStatusBarItemName("bookmark", "bookmarks")
 	am.list.Paginator.Type = paginator.Arabic
 	am.list.Paginator.ArabicFormat = "Page %d/%d"
+	am.connectKey.SetHelp("⏎", "connect")
+	am.syncKey.SetHelp("s/S", "push/pull")
 	am.addKey.SetHelp("a", "add")
 	am.editKey.SetHelp("e", "edit")
 	am.deleteKey.SetHelp("d", "delete")
-	am.langToggleKey.SetHelp("L", "toggle language")
+	am.starKey.SetHelp("*", "star")
+	am.configKey.SetHelp("c", "config")
+	am.updateKey.SetHelp("u", "update")
+	am.langToggleKey.SetHelp("L", "lang")
 }
 
 func getListSize(width, height int) (int, int) {
@@ -235,9 +372,24 @@ func getListSize(width, height int) (int, int) {
 func createListWithSelection(selectedIndex int) {
 	items := make([]list.Item, len(AM.BookmarkInfo.List))
 	for i, info := range AM.BookmarkInfo.List {
-		items[i] = item(info.Title + "(" + info.Host + ")")
+		port := info.Port
+		if port <= 0 {
+			port = 22
+		}
+		user := info.Username
+		if user == "" {
+			user = "root"
+		}
+		star := ""
+		if info.Starred {
+			star = "★ "
+		}
+		title := info.Title
+		if title == "" {
+			title = info.Host
+		}
+		items[i] = item(fmt.Sprintf("%s%s · %s@%s:%d", star, title, user, info.Host, port))
 	}
-	// 使用实际窗口大小，如果没有则使用默认值
 	width := AM.width
 	height := AM.height
 	if width <= 0 {
@@ -254,12 +406,44 @@ func createListWithSelection(selectedIndex int) {
 	AM.list.SetShowStatusBar(true)
 	AM.list.StatusMessageLifetime = 2 * time.Second
 	AM.list.SetFilteringEnabled(true)
+	AM.list.Styles.TitleBar = lipgloss.NewStyle().Padding(0, 0, 0, 2)
+	AM.list.Styles.Title = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("75")).
+		Bold(true)
+	AM.list.Styles.StatusBar = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("241")).
+		Padding(0, 0, 1, 2)
+	AM.list.Styles.StatusBarActiveFilter = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("252"))
+	AM.list.Styles.StatusBarFilterCount = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("75"))
+	AM.list.Styles.NoItems = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("241")).
+		Padding(0, 0, 0, 2)
+	AM.list.Styles.ArabicPagination = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("243"))
+	AM.list.Styles.ActivePaginationDot = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("75")).
+		SetString("●")
+	AM.list.Styles.InactivePaginationDot = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("238")).
+		SetString("○")
+	AM.list.Styles.PaginationStyle = lipgloss.NewStyle().
+		PaddingLeft(2)
+	AM.list.Styles.HelpStyle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("241")).
+		Padding(0, 0, 0, 2)
+	AM.list.Styles.DividerDot = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("238")).
+		SetString(" · ")
 	AM.list.AdditionalShortHelpKeys = func() []key.Binding {
-		return []key.Binding{AM.addKey, AM.editKey, AM.deleteKey, AM.langToggleKey}
+		return []key.Binding{AM.connectKey, AM.syncKey, AM.addKey, AM.starKey, AM.configKey, AM.langToggleKey}
 	}
 	AM.list.AdditionalFullHelpKeys = func() []key.Binding {
-		return []key.Binding{AM.addKey, AM.editKey, AM.deleteKey, AM.langToggleKey}
+		return []key.Binding{AM.connectKey, AM.syncKey, AM.addKey, AM.editKey, AM.deleteKey, AM.starKey, AM.configKey, AM.updateKey, AM.langToggleKey}
 	}
+	// Re-trigger pagination calc after styles changed (padding differs from defaults)
+	AM.list.SetSize(listWidth, listHeight)
 	am := &AM
 	am.applyListLocale()
 
@@ -507,6 +691,26 @@ func overlayCenter(base, overlay string) string {
 	return overlayAt(base, overlay, x, y)
 }
 
+func tipStyle(level tipLevel) lipgloss.Style {
+	base := lipgloss.NewStyle().
+		Background(lipgloss.Color("235")).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("238")).
+		Padding(0, 1)
+	switch level {
+	case tipSuccess:
+		return base.Foreground(lipgloss.Color("78"))
+	case tipWarn:
+		return base.Foreground(lipgloss.Color("178"))
+	case tipError:
+		return base.Foreground(lipgloss.Color("203"))
+	case tipProgress:
+		return base.Foreground(lipgloss.Color("75"))
+	default:
+		return base.Foreground(lipgloss.Color("252"))
+	}
+}
+
 func buildConnectingOverlay(frameWidth, frameHeight int) string {
 	overlayWidth := (frameWidth * 9) / 10
 	overlayHeight := (frameHeight * 9) / 10
@@ -526,18 +730,18 @@ func buildConnectingOverlay(frameWidth, frameHeight int) string {
 	overlay := lipgloss.NewStyle().
 		Width(overlayWidth).
 		Height(overlayHeight).
-		Background(lipgloss.Color("254")).
+		Background(lipgloss.Color("236")).
 		Border(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("252")).
+		BorderForeground(lipgloss.Color("240")).
 		Render("")
 
 	badge := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("240")).
-		Background(lipgloss.Color("255")).
+		Foreground(lipgloss.Color("75")).
+		Background(lipgloss.Color("237")).
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("252")).
+		BorderForeground(lipgloss.Color("240")).
 		Padding(0, 2).
-		Render(AM.t("Connecting... please wait", "正在连接，请稍候"))
+		Render("⋯ " + AM.t("Connecting", "正在连接"))
 
 	return overlayCenter(overlay, badge)
 }
@@ -581,6 +785,10 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return am, am.handleEditorKey(msg)
 		}
 
+		if AM.configEditor != nil {
+			return am, am.handleConfigEditorKey(msg)
+		}
+
 		if AM.pendingDelete != nil {
 			return am, am.handleDeleteConfirmKey(msg)
 		}
@@ -599,26 +807,42 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return am, am.openEditBookmarkEditor()
 		} else if !isFiltering && msg.String() == "d" {
 			return am, am.openDeleteBookmarkConfirm()
-		} else if !isFiltering && msg.String() == "s" {
-			if AM.Token == "" {
-				return am, setTip(am.t("please configure token first", "请先配置 token"), tipWarn)
+		} else if !isFiltering && msg.String() == "*" {
+			return am, am.toggleStar()
+		} else if !isFiltering && msg.String() == "c" {
+			return am, am.openConfigEditor()
+		} else if !isFiltering && msg.String() == "u" {
+			if AM.isUpdating {
+				return am, nil
 			}
-			if AM.GistID == "" {
-				return am, setTip(am.t("please configure gist_id first", "请先配置 gist_id"), tipWarn)
+			AM.isUpdating = true
+			tipCmd := setTip(am.t("checking for updates...", "正在检查更新..."), tipProgress)
+			return am, tea.Batch(tipCmd, func() tea.Msg {
+				return updateCheckMsg{Result: checkUpdate()}
+			})
+		} else if !isFiltering && (msg.String() == "s" || msg.String() == "S") {
+			if tip := am.checkSyncConfig(); tip != nil {
+				return am, tip
 			}
-			err := UploadGist()
-			if err != nil {
-				return am, setTip(am.t("upload failed: ", "上传失败: ")+err.Error(), tipError)
+			if AM.isSyncing {
+				return am, nil
 			}
-			jsonStr, err := json.Marshal(am.BookmarkInfo.List)
-			if err != nil {
-				return am, setTip(am.t("save failed: ", "保存失败: ")+err.Error(), tipError)
+			AM.isSyncing = true
+			if msg.String() == "s" {
+				tipCmd := setTip(am.t("pushing to gist...", "正在推送到 Gist..."), tipProgress)
+				return am, tea.Batch(tipCmd, func() tea.Msg {
+					err := UploadGist()
+					return syncUploadMsg{Err: err, GistID: AM.GistID}
+				})
 			}
-			err = os.WriteFile(APP_DIR+"/bookmarks.json", jsonStr, 0644)
-			if err != nil {
-				return am, setTip(am.t("write failed: ", "写入文件失败: ")+err.Error(), tipError)
-			}
-			return am, setTip(am.t("sync completed", "同步成功"), tipSuccess)
+			tipCmd := setTip(am.t("pulling from gist...", "正在从 Gist 拉取..."), tipProgress)
+			return am, tea.Batch(tipCmd, func() tea.Msg {
+				err := GetGist()
+				if err != nil {
+					return syncDownloadMsg{Err: err}
+				}
+				return syncDownloadMsg{Bookmarks: AM.BookmarkInfo.List}
+			})
 		} else if msg.String() == "enter" {
 			bookmark, port, err := buildConnectTarget()
 			if err != nil {
@@ -639,6 +863,49 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return am, tea.Sequence(tipCmd, connectExecCmd(sshClient, successTip, failurePrefix))
 			}
 			return am, tea.Sequence(tipCmd, probeConnectCmd(sshClient, bookmark, port))
+		}
+		// Navigation wrapping
+		if am.list.FilterState() == list.Unfiltered {
+			totalItems := len(AM.BookmarkInfo.List)
+			currentIndex := am.list.GlobalIndex()
+			if totalItems > 1 {
+				switch msg.String() {
+				case "up", "k":
+					if currentIndex <= 0 {
+						am.list.Select(totalItems - 1)
+						if am.list.Paginator.PerPage > 0 {
+							am.list.Paginator.Page = (totalItems - 1) / am.list.Paginator.PerPage
+						}
+						return am, nil
+					}
+				case "down", "j":
+					if currentIndex >= totalItems-1 {
+						am.list.Select(0)
+						am.list.Paginator.Page = 0
+						return am, nil
+					}
+				}
+			}
+			if am.list.Paginator.TotalPages > 1 {
+				switch msg.String() {
+				case "left", "h", "pgup":
+					if am.list.Paginator.Page <= 0 {
+						am.list.Paginator.Page = am.list.Paginator.TotalPages - 1
+						lastPageStart := am.list.Paginator.PerPage * (am.list.Paginator.TotalPages - 1)
+						if lastPageStart >= totalItems {
+							lastPageStart = totalItems - 1
+						}
+						am.list.Select(lastPageStart)
+						return am, nil
+					}
+				case "right", "l", "pgdn":
+					if am.list.Paginator.Page >= am.list.Paginator.TotalPages-1 {
+						am.list.Paginator.Page = 0
+						am.list.Select(0)
+						return am, nil
+					}
+				}
+			}
 		}
 	case tea.WindowSizeMsg:
 		selectedIndex := am.list.GlobalIndex()
@@ -665,9 +932,77 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		tipCmd := tea.Cmd(nil)
 		execCmd := connectExecCmd(msg.SSHClient, msg.SuccessTip, msg.FailurePrefix)
 		return am, tea.Sequence(tipCmd, execCmd)
+	case updateCheckMsg:
+		AM.isUpdating = false
+		r := msg.Result
+		if r.Err != nil {
+			if r.Unreachable {
+				return am, setTip(am.t("cannot reach GitHub, check network", "无法连接 GitHub，请检查网络"), tipWarn)
+			}
+			return am, setTip(am.t("update check failed: ", "检查更新失败: ")+r.Err.Error(), tipError)
+		}
+		if !r.Available {
+			return am, setTip(am.t("already latest "+r.Latest, "已是最新版本 "+r.Latest), tipSuccess)
+		}
+		return am, setTip(fmt.Sprintf(am.t("new version %s available: brew upgrade ttm", "发现新版本 %s: brew upgrade ttm"), r.Latest), tipInfo)
+	case syncUploadMsg:
+		AM.isSyncing = false
+		if msg.Err != nil {
+			return am, setTip(am.t("push failed: ", "推送失败: ")+msg.Err.Error(), tipError)
+		}
+		if msg.GistID != "" && AM.GistID != msg.GistID {
+			AM.GistID = msg.GistID
+			_ = SaveConfig(am.GistConfig)
+		}
+		jsonStr, err := json.MarshalIndent(am.BookmarkInfo.List, "", "  ")
+		if err != nil {
+			return am, setTip(am.t("save failed: ", "保存失败: ")+err.Error(), tipError)
+		}
+		if err := os.WriteFile(APP_DIR+"/bookmarks.json", jsonStr, 0600); err != nil {
+			return am, setTip(am.t("write failed: ", "写入文件失败: ")+err.Error(), tipError)
+		}
+		return am, setTip(am.t("pushed to gist", "已推送到 Gist"), tipSuccess)
+	case syncDownloadMsg:
+		AM.isSyncing = false
+		if msg.Err != nil {
+			return am, setTip(am.t("pull failed: ", "拉取失败: ")+msg.Err.Error(), tipError)
+		}
+		AM.BookmarkInfo.List = msg.Bookmarks
+		sortBookmarksByStarred(AM.BookmarkInfo.List)
+		jsonStr, err := json.MarshalIndent(AM.BookmarkInfo.List, "", "  ")
+		if err != nil {
+			return am, setTip(am.t("save failed: ", "保存失败: ")+err.Error(), tipError)
+		}
+		if err := os.WriteFile(APP_DIR+"/bookmarks.json", jsonStr, 0600); err != nil {
+			return am, setTip(am.t("write failed: ", "写入文件失败: ")+err.Error(), tipError)
+		}
+		am.refreshList()
+		return am, setTip(fmt.Sprintf(am.t("pulled %d bookmarks from gist", "已从 Gist 拉取 %d 条书签"), len(msg.Bookmarks)), tipSuccess)
 	case clearTipMsg:
 		if msg.Seq == AM.tipSeq {
 			AM.TipString = ""
+		}
+		return am, nil
+	}
+
+	if AM.configEditor != nil {
+		focused := AM.configEditor.focusedField()
+		if focused != configFieldPlatform {
+			idx := int(focused)
+			updated, cmd := AM.configEditor.inputs[idx].Update(msg)
+			AM.configEditor.inputs[idx] = updated
+			return am, cmd
+		}
+		return am, nil
+	}
+
+	if AM.editor != nil {
+		focusField := AM.editor.focusedField()
+		if focusField != editorFieldAuthType {
+			idx := int(focusField)
+			updated, cmd := AM.editor.inputs[idx].Update(msg)
+			AM.editor.inputs[idx] = updated
+			return am, cmd
 		}
 		return am, nil
 	}
@@ -677,19 +1012,66 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return am, cmd
 }
 
+// compactListView rearranges the bubbles list output so that:
+//   - items stay at the top (no trailing blank padding)
+//   - pagination + help bar are pinned together at the bottom
+//   - the natural gap between them fills the remaining height
+func compactListView(s string, totalHeight int) string {
+	lines := strings.Split(s, "\n")
+
+	// The bubbles list View renders sections in order:
+	//   title, status, content(Height=availHeight), pagination, help
+	// The content block has blank-line padding after items.
+	// We strip that padding and let the gap push footer to the bottom.
+
+	// Count footer lines from the bottom (pagination + help, always last).
+	// These are contiguous non-blank lines at the tail of the output.
+	end := len(lines)
+	for end > 0 && strings.TrimSpace(ansi.Strip(lines[end-1])) == "" {
+		end--
+	}
+	footerEnd := end
+	footerStart := footerEnd
+	for footerStart > 0 && strings.TrimSpace(ansi.Strip(lines[footerStart-1])) != "" {
+		footerStart--
+	}
+	footer := lines[footerStart:footerEnd]
+
+	// Content: everything above footer, trim trailing blanks (the padding).
+	contentEnd := footerStart
+	for contentEnd > 0 && strings.TrimSpace(ansi.Strip(lines[contentEnd-1])) == "" {
+		contentEnd--
+	}
+	content := lines[:contentEnd]
+
+	gap := totalHeight - len(content) - len(footer)
+	if gap < 1 {
+		gap = 1
+	}
+
+	result := make([]string, 0, totalHeight)
+	result = append(result, content...)
+	for i := 0; i < gap; i++ {
+		result = append(result, "")
+	}
+	result = append(result, footer...)
+	return strings.Join(result, "\n")
+}
+
 func (am *AppModel) View() string {
 	am.applyListLocale()
-	listView := am.list.View()
-	hasTip := strings.TrimSpace(am.TipString) != ""
-	if !hasTip && !AM.isConnecting && AM.editor == nil && AM.pendingDelete == nil {
-		return docStyle.Render(listView)
-	}
 	frameWidth, frameHeight := getListSize(AM.width, AM.height)
+	rawView := am.list.View()
 	if frameWidth <= 0 {
-		frameWidth = lipgloss.Width(listView)
+		frameWidth = lipgloss.Width(rawView)
 	}
 	if frameHeight <= 0 {
-		frameHeight = lipgloss.Height(listView)
+		frameHeight = lipgloss.Height(rawView)
+	}
+	listView := compactListView(rawView, frameHeight)
+	hasTip := strings.TrimSpace(am.TipString) != ""
+	if !hasTip && !AM.isConnecting && AM.editor == nil && AM.configEditor == nil && AM.pendingDelete == nil {
+		return docStyle.Render(listView)
 	}
 
 	tipOverlay := ""
@@ -705,53 +1087,29 @@ func (am *AppModel) View() string {
 			maxTipWidth = 16
 		}
 		tipText := ansi.Truncate(AM.TipString, maxTipWidth, "…")
-
-		tipOverlay = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("248")).
-			Background(lipgloss.Color("238")).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("242")).
-			Padding(0, 0).
-			Render(tipText)
-
 		switch AM.tipLevel {
-		case tipSuccess:
-			tipOverlay = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("84")).
-				Background(lipgloss.Color("235")).
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("70")).
-				Padding(0, 0).
-				Render(tipText)
-		case tipWarn:
-			tipOverlay = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("214")).
-				Background(lipgloss.Color("235")).
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("208")).
-				Padding(0, 0).
-				Render(tipText)
-		case tipError:
-			tipOverlay = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("203")).
-				Background(lipgloss.Color("235")).
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("196")).
-				Padding(0, 0).
-				Render(tipText)
 		case tipProgress:
-			tipOverlay = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("111")).
-				Background(lipgloss.Color("235")).
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("110")).
-				Padding(0, 0).
-				Render("... " + tipText)
+			tipText = "⋯ " + tipText
+		case tipSuccess:
+			tipText = "✓ " + tipText
+		case tipWarn:
+			tipText = "! " + tipText
+		case tipError:
+			tipText = "✗ " + tipText
 		}
+		tipOverlay = tipStyle(AM.tipLevel).Render(tipText)
 	}
 
 	if AM.editor != nil {
 		view := am.buildEditorOverlay(frameWidth, frameHeight)
+		if tipOverlay != "" {
+			view = overlayTopRight(view, tipOverlay)
+		}
+		return docStyle.Render(view)
+	}
+
+	if AM.configEditor != nil {
+		view := am.buildConfigEditorOverlay(frameWidth, frameHeight)
 		if tipOverlay != "" {
 			view = overlayTopRight(view, tipOverlay)
 		}

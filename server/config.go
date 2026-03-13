@@ -22,11 +22,11 @@ func SaveConfig(config GistConfig) error {
 			return err
 		}
 	}
-	configStr, err := json.Marshal(config)
+	configStr, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to encode config: %w", err)
 	}
-	if err := os.WriteFile(ConfigFile, configStr, 0644); err != nil {
+	if err := os.WriteFile(ConfigFile, configStr, 0600); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 	return nil
@@ -54,7 +54,7 @@ func InitConfig() (error, GistConfig) {
 			Locale:   "en",
 		}
 		configStr, _ := json.Marshal(config)
-		err = os.WriteFile(ConfigFile, configStr, 0644)
+		err = os.WriteFile(ConfigFile, configStr, 0600)
 		if err != nil {
 			return fmt.Errorf("failed to create config file: %w", err), GistConfig{}
 		}

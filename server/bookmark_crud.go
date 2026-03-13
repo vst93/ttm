@@ -44,15 +44,16 @@ const (
 )
 
 type bookmarkEditor struct {
-	mode       bookmarkEditorMode
-	editIndex  int
-	focusIndex int
-	authType   authTypeMode
-	authDirty  bool
-	scroll     int
-	inputs     []textinput.Model
-	original   BookmarkItem
-	viewport   viewport.Model
+	mode          bookmarkEditorMode
+	editIndex     int
+	focusIndex    int
+	authType      authTypeMode
+	authDirty     bool
+	scroll        int
+	scrollToFocus bool
+	inputs        []textinput.Model
+	original      BookmarkItem
+	viewport      viewport.Model
 }
 
 type deleteConfirmState struct {
@@ -221,6 +222,7 @@ func (be *bookmarkEditor) setFocus(index int) tea.Cmd {
 		index = 0
 	}
 	be.focusIndex = index
+	be.scrollToFocus = true
 	focusedField := be.focusedField()
 	cmds := make([]tea.Cmd, 0, len(fields)+1)
 	cmds = append(cmds, textinput.Blink)
@@ -248,16 +250,24 @@ func (be *bookmarkEditor) selectedIndex(max int) int {
 	return index
 }
 
-func (am *AppModel) bookmarkLabel(item BookmarkItem) string {
-	title := strings.TrimSpace(item.Title)
-	host := strings.TrimSpace(item.Host)
+func (am *AppModel) bookmarkLabel(bm BookmarkItem) string {
+	title := strings.TrimSpace(bm.Title)
+	host := strings.TrimSpace(bm.Host)
 	if title == "" {
 		title = host
 	}
 	if host == "" {
 		host = am.t("unknown", "未知")
 	}
-	return title + "(" + host + ")"
+	user := strings.TrimSpace(bm.Username)
+	if user == "" {
+		user = "root"
+	}
+	port := bm.Port
+	if port <= 0 {
+		port = 22
+	}
+	return fmt.Sprintf("%s (%s@%s:%d)", title, user, host, port)
 }
 
 func (am *AppModel) selectedBookmarkIndex() int {
@@ -502,6 +512,42 @@ func (am *AppModel) saveEditor() tea.Cmd {
 	return setTip(am.t("bookmark added", "书签已新增"), tipSuccess)
 }
 
+func (am *AppModel) toggleStar() tea.Cmd {
+	selected := am.selectedBookmarkIndex()
+	if selected < 0 {
+		return setTip(am.t("no bookmark to star", "没有可标星的书签"), tipWarn)
+	}
+	AM.BookmarkInfo.List[selected].Starred = !AM.BookmarkInfo.List[selected].Starred
+	starred := AM.BookmarkInfo.List[selected].Starred
+
+	// Track the bookmark to follow it after sorting
+	bm := AM.BookmarkInfo.List[selected]
+	sortBookmarksByStarred(AM.BookmarkInfo.List)
+
+	// Find new position
+	newIndex := 0
+	for i, b := range AM.BookmarkInfo.List {
+		if b.Host == bm.Host && b.Title == bm.Title && b.Username == bm.Username && b.Port == bm.Port {
+			newIndex = i
+			break
+		}
+	}
+
+	if err := saveBookmarksToDisk(AM.BookmarkInfo.List); err != nil {
+		// Revert
+		AM.BookmarkInfo.List[selected].Starred = !AM.BookmarkInfo.List[selected].Starred
+		sortBookmarksByStarred(AM.BookmarkInfo.List)
+		createListWithSelection(selected)
+		return setTip(am.t("star failed: ", "标星失败: ")+err.Error(), tipError)
+	}
+
+	createListWithSelection(newIndex)
+	if starred {
+		return setTip(am.t("bookmark starred", "书签已标星"), tipSuccess)
+	}
+	return setTip(am.t("bookmark unstarred", "书签已取消标星"), tipSuccess)
+}
+
 func (am *AppModel) editorFieldLabel(field editorField) string {
 	switch field {
 	case editorFieldTitle:
@@ -527,9 +573,11 @@ func (am *AppModel) editorFieldLabel(field editorField) string {
 
 func (am *AppModel) editorAuthTypeView() string {
 	current := AM.editor.authTypeText(am.locale)
-	hint := am.t("left/right or m to switch", "left/right 或 m 切换")
-	style := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
-	return style.Render(current) + " " + lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(hint)
+	hint := am.t("← → / m switch", "← → / m 切换")
+	valueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)
+	arrowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	return arrowStyle.Render("◂ ") + valueStyle.Render(current) + arrowStyle.Render(" ▸") + "  " + hintStyle.Render(hint)
 }
 
 func (am *AppModel) buildEditorOverlay(frameWidth, frameHeight int) string {
@@ -545,7 +593,7 @@ func (am *AppModel) buildEditorOverlay(frameWidth, frameHeight int) string {
 		overlayHeight = 6
 	}
 
-	inputWidth := overlayWidth - 4
+	inputWidth := overlayWidth - 6
 	if inputWidth < 8 {
 		inputWidth = 8
 	}
@@ -553,25 +601,29 @@ func (am *AppModel) buildEditorOverlay(frameWidth, frameHeight int) string {
 		AM.editor.inputs[i].Width = inputWidth
 	}
 
-	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	focusLabelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("69")).Bold(true)
-	inputLineStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	dimLabelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
+	focusLabelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)
+	focusInputStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
+	blurInputStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	body := strings.Builder{}
 	fields := AM.editor.activeFields()
 	for i := range fields {
 		field := fields[i]
 		label := am.editorFieldLabel(field)
-		if i == AM.editor.focusIndex {
-			label = focusLabelStyle.Render("● " + label)
+		isFocused := i == AM.editor.focusIndex
+		if isFocused {
+			label = focusLabelStyle.Render("▸ " + label)
 		} else {
-			label = labelStyle.Render("○ " + label)
+			label = dimLabelStyle.Render("  " + label)
 		}
 		body.WriteString(label)
 		body.WriteString("\n")
 		if field == editorFieldAuthType {
-			body.WriteString(am.editorAuthTypeView())
+			body.WriteString("  " + am.editorAuthTypeView())
+		} else if isFocused {
+			body.WriteString("  " + focusInputStyle.Render(AM.editor.inputs[int(field)].View()))
 		} else {
-			body.WriteString(inputLineStyle.Render(AM.editor.inputs[int(field)].View()))
+			body.WriteString("  " + blurInputStyle.Render(AM.editor.inputs[int(field)].View()))
 		}
 		if i != len(fields)-1 {
 			body.WriteString("\n\n")
@@ -579,17 +631,25 @@ func (am *AppModel) buildEditorOverlay(frameWidth, frameHeight int) string {
 	}
 	bodyText := body.String()
 
-	title := am.t("SSH Bookmark Editor", "SSH 书签编辑")
+	titleIcon := "✎ "
+	title := am.t("Edit Bookmark", "编辑书签")
 	if AM.editor.mode == editorModeAdd {
-		title = am.t("Add SSH Bookmark", "新增 SSH 书签")
+		titleIcon = "+ "
+		title = am.t("Add Bookmark", "新增书签")
 	}
-	help := am.t("tab/shift+tab switch • m auth type • ctrl+s save • esc cancel", "tab/shift+tab 切换 • m 认证方式 • ctrl+s 保存 • esc 取消")
+	help := am.t("tab switch · m auth · ^S save · esc cancel",
+		"tab 切换 · m 认证 · ^S 保存 · esc 取消")
+	sepWidth := inputWidth + 2
+	if sepWidth > overlayWidth-2 {
+		sepWidth = overlayWidth - 2
+	}
+	separator := lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(strings.Repeat("─", sepWidth))
 
 	content := lipgloss.JoinVertical(
 		lipgloss.Left,
-		lipgloss.NewStyle().Foreground(lipgloss.Color("69")).Bold(true).Render(title),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(help),
-		"",
+		lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true).Render(titleIcon+title),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(help),
+		separator,
 		bodyText,
 	)
 	containerWidth := overlayWidth
@@ -617,21 +677,26 @@ func (am *AppModel) buildEditorOverlay(frameWidth, frameHeight int) string {
 	}
 	AM.editor.viewport = viewport.New(viewportWidth, viewportHeight)
 	AM.editor.viewport.SetContent(content)
-	if AM.editor.scroll > 0 {
-		AM.editor.viewport.SetYOffset(AM.editor.scroll)
-	}
-	if AM.editor.scroll == 0 {
+	AM.editor.viewport.SetYOffset(AM.editor.scroll)
+	if AM.editor.scrollToFocus {
+		AM.editor.scrollToFocus = false
 		focusedIndex := AM.editor.focusIndex
 		if focusedIndex < 0 {
 			focusedIndex = 0
 		}
-		lineCursor := focusedIndex * 3
-		if lineCursor > AM.editor.viewport.YOffset+AM.editor.viewport.Height-2 {
-			AM.editor.viewport.SetYOffset(lineCursor - (AM.editor.viewport.Height - 2))
+		// 3 header lines (title + help + blank), then 3 lines per field
+		lineCursor := 3 + focusedIndex*3
+		yOffset := AM.editor.viewport.YOffset
+		if lineCursor+1 >= yOffset+viewportHeight {
+			yOffset = lineCursor + 2 - viewportHeight
 		}
-		if lineCursor < AM.editor.viewport.YOffset {
-			AM.editor.viewport.SetYOffset(lineCursor)
+		if lineCursor < yOffset {
+			yOffset = lineCursor
 		}
+		if yOffset < 0 {
+			yOffset = 0
+		}
+		AM.editor.viewport.SetYOffset(yOffset)
 	}
 	AM.editor.scroll = AM.editor.viewport.YOffset
 
@@ -653,10 +718,11 @@ func (am *AppModel) buildDeleteConfirmOverlay(frameWidth int) string {
 	if overlayWidth > frameWidth {
 		overlayWidth = frameWidth
 	}
-	title := lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true).Render(am.t("Delete bookmark?", "删除书签？"))
-	entry := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(AM.pendingDelete.label)
-	help := lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(am.t("y/enter confirm • n/esc cancel", "y/enter 确认 • n/esc 取消"))
-	content := lipgloss.JoinVertical(lipgloss.Left, title, "", entry, "", help)
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true).Render("✗ " + am.t("Delete bookmark?", "删除书签？"))
+	entry := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render("  " + AM.pendingDelete.label)
+	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(strings.Repeat("─", overlayWidth-4))
+	help := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(am.t("y/enter confirm · n/esc cancel", "y/enter 确认 · n/esc 取消"))
+	content := lipgloss.JoinVertical(lipgloss.Left, title, sep, entry, "", help)
 	return lipgloss.NewStyle().
 		Width(overlayWidth).
 		Padding(1, 2).

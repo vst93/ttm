@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"os"
+	"sort"
 )
 
 type BookmarkInfo struct {
@@ -28,6 +29,16 @@ type BookmarkItem struct {
 	Passphrase          string `json:"passphrase"`
 	StartDirectoryLocal string `json:"startDirectoryLocal"`
 	StartDirectory      string `json:"startDirectory"`
+	Starred             bool   `json:"starred,omitempty"`
+}
+
+func sortBookmarksByStarred(list []BookmarkItem) {
+	sort.SliceStable(list, func(i, j int) bool {
+		if list[i].Starred != list[j].Starred {
+			return list[i].Starred
+		}
+		return false
+	})
 }
 
 func (b *BookmarkInfo) Init() error {
@@ -43,5 +54,6 @@ func (b *BookmarkInfo) Init() error {
 			AM.TipString = AM.t("failed to read bookmarks: ", "读取书签失败: ") + err.Error()
 		}
 	}
+	sortBookmarksByStarred(AM.BookmarkInfo.List)
 	return nil
 }
