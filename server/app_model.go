@@ -197,10 +197,10 @@ type AppModel struct {
 	editor        *bookmarkEditor
 	configEditor  *configEditor
 	pendingDelete *deleteConfirmState
-	isConnecting bool
-	isUpdating   bool
-	isSyncing    bool
-	width        int
+	isConnecting  bool
+	isUpdating    bool
+	isSyncing     bool
+	width         int
 	height        int
 }
 
