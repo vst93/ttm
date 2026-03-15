@@ -197,6 +197,7 @@ type AppModel struct {
 	editor        *bookmarkEditor
 	configEditor  *configEditor
 	pendingDelete *deleteConfirmState
+	pendingSync   *syncConfirmState
 	isConnecting  bool
 	isUpdating    bool
 	isSyncing     bool
@@ -257,14 +258,14 @@ func (am *AppModel) t(en, zh string) string {
 	return en
 }
 
-func (am *AppModel) checkSyncConfig() tea.Cmd {
+func (am *AppModel) checkSyncConfig(requireGistID bool) tea.Cmd {
 	if AM.Token == "" {
 		return setTip(am.t(
 			"token not configured, press c to open config",
 			"未配置 token，按 c 打开配置",
 		), tipWarn)
 	}
-	if AM.GistID == "" {
+	if requireGistID && AM.GistID == "" {
 		return setTip(am.t(
 			"gist_id not configured, press c to open config",
 			"未配置 gist_id，按 c 打开配置",
@@ -793,6 +794,10 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return am, am.handleDeleteConfirmKey(msg)
 		}
 
+		if AM.pendingSync != nil {
+			return am, am.handleSyncConfirmKey(msg)
+		}
+
 		isFiltering := am.list.FilterState() == list.Filtering
 		if !isFiltering && msg.String() == "L" {
 			am.toggleLocale()
@@ -821,28 +826,17 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return updateCheckMsg{Result: checkUpdate()}
 			})
 		} else if !isFiltering && (msg.String() == "s" || msg.String() == "S") {
-			if tip := am.checkSyncConfig(); tip != nil {
+			requireGistID := msg.String() == "S"
+			if tip := am.checkSyncConfig(requireGistID); tip != nil {
 				return am, tip
 			}
 			if AM.isSyncing {
 				return am, nil
 			}
-			AM.isSyncing = true
 			if msg.String() == "s" {
-				tipCmd := setTip(am.t("pushing to gist...", "正在推送到 Gist..."), tipProgress)
-				return am, tea.Batch(tipCmd, func() tea.Msg {
-					err := UploadGist()
-					return syncUploadMsg{Err: err, GistID: AM.GistID}
-				})
+				return am, am.openSyncConfirm(syncActionPush)
 			}
-			tipCmd := setTip(am.t("pulling from gist...", "正在从 Gist 拉取..."), tipProgress)
-			return am, tea.Batch(tipCmd, func() tea.Msg {
-				err := GetGist()
-				if err != nil {
-					return syncDownloadMsg{Err: err}
-				}
-				return syncDownloadMsg{Bookmarks: AM.BookmarkInfo.List}
-			})
+			return am, am.openSyncConfirm(syncActionPull)
 		} else if msg.String() == "enter" {
 			bookmark, port, err := buildConnectTarget()
 			if err != nil {
@@ -950,9 +944,12 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err != nil {
 			return am, setTip(am.t("push failed: ", "推送失败: ")+msg.Err.Error(), tipError)
 		}
-		if msg.GistID != "" && AM.GistID != msg.GistID {
+		if msg.GistID != "" {
 			AM.GistID = msg.GistID
-			_ = SaveConfig(am.GistConfig)
+			am.GistConfig.GistID = msg.GistID
+			if err := SaveConfig(am.GistConfig); err != nil {
+				return am, setTip(am.t("write config failed: ", "写入配置失败: ")+err.Error(), tipError)
+			}
 		}
 		jsonStr, err := json.MarshalIndent(am.BookmarkInfo.List, "", "  ")
 		if err != nil {
@@ -1070,7 +1067,7 @@ func (am *AppModel) View() string {
 	}
 	listView := compactListView(rawView, frameHeight)
 	hasTip := strings.TrimSpace(am.TipString) != ""
-	if !hasTip && !AM.isConnecting && AM.editor == nil && AM.configEditor == nil && AM.pendingDelete == nil {
+	if !hasTip && !AM.isConnecting && AM.editor == nil && AM.configEditor == nil && AM.pendingDelete == nil && AM.pendingSync == nil {
 		return docStyle.Render(listView)
 	}
 
@@ -1126,6 +1123,11 @@ func (am *AppModel) View() string {
 	if AM.pendingDelete != nil {
 		dimmed := dimBaseForOverlay(view)
 		overlayLayer := am.buildDeleteConfirmOverlay(frameWidth)
+		view = overlayCenter(dimmed, overlayLayer)
+	}
+	if AM.pendingSync != nil {
+		dimmed := dimBaseForOverlay(view)
+		overlayLayer := am.buildSyncConfirmOverlay(frameWidth)
 		view = overlayCenter(dimmed, overlayLayer)
 	}
 	if tipOverlay != "" {

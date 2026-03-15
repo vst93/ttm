@@ -49,6 +49,8 @@ type bookmarkEditor struct {
 	focusIndex    int
 	authType      authTypeMode
 	authDirty     bool
+	showSecrets   bool
+	secretValues  map[editorField]string
 	scroll        int
 	scrollToFocus bool
 	inputs        []textinput.Model
@@ -57,8 +59,9 @@ type bookmarkEditor struct {
 }
 
 type deleteConfirmState struct {
-	index int
-	label string
+	index     int
+	label     string
+	selectYes bool
 }
 
 func saveBookmarksToDisk(bookmarks []BookmarkItem) error {
@@ -91,18 +94,9 @@ func buildEditorInput(value, placeholder string) textinput.Model {
 }
 
 func newBookmarkEditor(mode bookmarkEditorMode, index int, existing BookmarkItem) *bookmarkEditor {
-	password := ""
-	privateKey := ""
-	passphrase := ""
-	if strings.TrimSpace(existing.Password) != "" {
-		password = maskedSecretValue
-	}
-	if strings.TrimSpace(existing.PrivateKey) != "" {
-		privateKey = maskedSecretValue
-	}
-	if strings.TrimSpace(existing.Passphrase) != "" {
-		passphrase = maskedSecretValue
-	}
+	password := existing.Password
+	privateKey := existing.PrivateKey
+	passphrase := existing.Passphrase
 
 	port := ""
 	if existing.Port > 0 {
@@ -124,10 +118,16 @@ func newBookmarkEditor(mode bookmarkEditorMode, index int, existing BookmarkItem
 	}
 
 	editor := &bookmarkEditor{
-		mode:      mode,
-		editIndex: index,
-		authType:  authType,
-		original:  existing,
+		mode:        mode,
+		editIndex:   index,
+		authType:    authType,
+		showSecrets: false,
+		secretValues: map[editorField]string{
+			editorFieldPassword:   existing.Password,
+			editorFieldPrivateKey: existing.PrivateKey,
+			editorFieldPassphrase: existing.Passphrase,
+		},
+		original: existing,
 		inputs: []textinput.Model{
 			buildEditorInput(existing.Title, "server-prod"),
 			buildEditorInput(existing.Host, "10.0.0.8"),
@@ -141,7 +141,89 @@ func newBookmarkEditor(mode bookmarkEditorMode, index int, existing BookmarkItem
 	}
 	editor.inputs[editorFieldAuthType].Blur()
 	editor.setFocus(0)
+	editor.applySecretVisibility()
 	return editor
+}
+
+func isSecretEditorField(field editorField) bool {
+	return field == editorFieldPassword || field == editorFieldPrivateKey || field == editorFieldPassphrase
+}
+
+func (be *bookmarkEditor) applySecretVisibility() {
+	secretFields := []editorField{editorFieldPassword, editorFieldPrivateKey, editorFieldPassphrase}
+	if be.showSecrets {
+		for _, field := range secretFields {
+			be.inputs[int(field)].SetValue(be.secretValues[field])
+			be.inputs[int(field)].CursorStart()
+		}
+		return
+	}
+	for _, field := range secretFields {
+		if strings.TrimSpace(be.secretValues[field]) == "" {
+			be.inputs[int(field)].SetValue("")
+			be.inputs[int(field)].CursorStart()
+			continue
+		}
+		be.inputs[int(field)].SetValue(maskedSecretValue)
+		be.inputs[int(field)].CursorStart()
+	}
+}
+
+func (be *bookmarkEditor) toggleSecretVisibility() {
+	be.showSecrets = !be.showSecrets
+	be.applySecretVisibility()
+}
+
+func (be *bookmarkEditor) captureSecretInput(field editorField) {
+	if !isSecretEditorField(field) || !be.showSecrets {
+		return
+	}
+	value := be.inputs[int(field)].Value()
+	previous := be.secretValues[field]
+	if strings.TrimSpace(value) == maskedSecretValue && strings.TrimSpace(be.secretValues[field]) != "" {
+		return
+	}
+	if field == editorFieldPrivateKey && strings.Contains(previous, "\n") {
+		normalizedPrevious := strings.Join(strings.Fields(strings.ReplaceAll(strings.ReplaceAll(previous, "\r\n", "\n"), "\n", " ")), " ")
+		normalizedValue := strings.Join(strings.Fields(value), " ")
+		if normalizedPrevious == normalizedValue {
+			return
+		}
+	}
+	be.secretValues[field] = value
+}
+
+func (be *bookmarkEditor) fieldValueForCopy(field editorField) string {
+	if isSecretEditorField(field) {
+		if strings.TrimSpace(be.secretValues[field]) != "" {
+			return be.secretValues[field]
+		}
+		inputValue := be.inputs[int(field)].Value()
+		if strings.TrimSpace(inputValue) != "" && strings.TrimSpace(inputValue) != maskedSecretValue {
+			return inputValue
+		}
+		switch field {
+		case editorFieldPassword:
+			return be.original.Password
+		case editorFieldPrivateKey:
+			return be.original.PrivateKey
+		case editorFieldPassphrase:
+			return be.original.Passphrase
+		}
+		return ""
+	}
+	if field == editorFieldAuthType {
+		return be.authTypeText(AM.locale)
+	}
+	return be.inputs[int(field)].Value()
+}
+
+func (be *bookmarkEditor) modeHint(am *AppModel) string {
+	base := lipgloss.NewStyle().Bold(true).Padding(0, 1)
+	if be.showSecrets {
+		return base.Foreground(lipgloss.Color("16")).Background(lipgloss.Color("78")).Render(am.t("SHOWN", "显示"))
+	}
+	return base.Foreground(lipgloss.Color("16")).Background(lipgloss.Color("220")).Render(am.t("HIDDEN", "隐藏"))
 }
 
 func (be *bookmarkEditor) activeFields() []editorField {
@@ -288,6 +370,7 @@ func (am *AppModel) openAddBookmarkEditor() tea.Cmd {
 	editor := newBookmarkEditor(editorModeAdd, len(AM.BookmarkInfo.List), BookmarkItem{Port: 22, EnableSSH: true})
 	AM.editor = editor
 	AM.pendingDelete = nil
+	AM.pendingSync = nil
 	return editor.setFocus(0)
 }
 
@@ -299,6 +382,7 @@ func (am *AppModel) openEditBookmarkEditor() tea.Cmd {
 	editor := newBookmarkEditor(editorModeEdit, selected, AM.BookmarkInfo.List[selected])
 	AM.editor = editor
 	AM.pendingDelete = nil
+	AM.pendingSync = nil
 	return editor.setFocus(0)
 }
 
@@ -308,9 +392,11 @@ func (am *AppModel) openDeleteBookmarkConfirm() tea.Cmd {
 		return setTip(am.t("no bookmark to delete", "没有可删除的书签"), tipWarn)
 	}
 	AM.pendingDelete = &deleteConfirmState{
-		index: selected,
-		label: am.bookmarkLabel(AM.BookmarkInfo.List[selected]),
+		index:     selected,
+		label:     am.bookmarkLabel(AM.BookmarkInfo.List[selected]),
+		selectYes: false,
 	}
+	AM.pendingSync = nil
 	AM.editor = nil
 	return nil
 }
@@ -323,7 +409,29 @@ func (am *AppModel) handleDeleteConfirmKey(msg tea.KeyMsg) tea.Cmd {
 	case "esc", "n":
 		AM.pendingDelete = nil
 		return setTip(am.t("delete cancelled", "已取消删除"), tipInfo)
-	case "y", "enter":
+	case "left", "h", "right", "l", "tab", "shift+tab":
+		AM.pendingDelete.selectYes = !AM.pendingDelete.selectYes
+		return nil
+	case "y":
+		deleteIndex := AM.pendingDelete.index
+		AM.pendingDelete = nil
+		if deleteIndex < 0 || deleteIndex >= len(AM.BookmarkInfo.List) {
+			return setTip(am.t("selected bookmark not found", "未找到选中的书签"), tipWarn)
+		}
+		previous := append([]BookmarkItem(nil), AM.BookmarkInfo.List...)
+		AM.BookmarkInfo.List = append(AM.BookmarkInfo.List[:deleteIndex], AM.BookmarkInfo.List[deleteIndex+1:]...)
+		if err := saveBookmarksToDisk(AM.BookmarkInfo.List); err != nil {
+			AM.BookmarkInfo.List = previous
+			createListWithSelection(deleteIndex)
+			return setTip(am.t("delete failed: ", "删除失败: ")+err.Error(), tipError)
+		}
+		createListWithSelection(deleteIndex)
+		return setTip(am.t("bookmark deleted", "书签已删除"), tipSuccess)
+	case "enter":
+		if !AM.pendingDelete.selectYes {
+			AM.pendingDelete = nil
+			return setTip(am.t("delete cancelled", "已取消删除"), tipInfo)
+		}
 		deleteIndex := AM.pendingDelete.index
 		AM.pendingDelete = nil
 		if deleteIndex < 0 || deleteIndex >= len(AM.BookmarkInfo.List) {
@@ -358,6 +466,19 @@ func (am *AppModel) handleEditorKey(msg tea.KeyMsg) tea.Cmd {
 	case "m":
 		AM.editor.cycleAuthType()
 		return AM.editor.setFocus(AM.editor.focusIndex)
+	case "ctrl+r":
+		AM.editor.toggleSecretVisibility()
+		return nil
+	case "ctrl+y":
+		field := AM.editor.focusedField()
+		value := AM.editor.fieldValueForCopy(field)
+		if strings.TrimSpace(value) == "" {
+			return setTip(am.t("nothing to copy", "没有可复制内容"), tipInfo)
+		}
+		if err := clipboardWriteAll(value); err != nil {
+			return setTip(am.t("copy failed: ", "复制失败: ")+err.Error(), tipError)
+		}
+		return setTip(fmt.Sprintf(am.t("copied %d chars", "已复制 %d 个字符"), len([]rune(value))), tipSuccess)
 	case "left", "right":
 		if AM.editor.focusedField() == editorFieldAuthType {
 			AM.editor.cycleAuthType()
@@ -391,18 +512,19 @@ func (am *AppModel) handleEditorKey(msg tea.KeyMsg) tea.Cmd {
 	if focusField == editorFieldAuthType {
 		return nil
 	}
+	if isSecretEditorField(focusField) && !AM.editor.showSecrets {
+		if strings.TrimSpace(AM.editor.fieldValueForCopy(focusField)) == "" {
+			AM.editor.showSecrets = true
+			AM.editor.applySecretVisibility()
+		} else {
+			return setTip(am.t("press ^R to reveal secret before editing", "编辑前请按 ^R 显示密钥"), tipInfo)
+		}
+	}
 	focus := int(focusField)
 	updated, cmd := AM.editor.inputs[focus].Update(msg)
 	AM.editor.inputs[focus] = updated
+	AM.editor.captureSecretInput(focusField)
 	return cmd
-}
-
-func resolveSecretValue(newValue, previousValue string) string {
-	trimmed := strings.TrimSpace(newValue)
-	if trimmed == maskedSecretValue {
-		return previousValue
-	}
-	return newValue
 }
 
 func (am *AppModel) saveEditor() tea.Cmd {
@@ -441,15 +563,15 @@ func (am *AppModel) saveEditor() tea.Cmd {
 	switch AM.editor.authType {
 	case authTypePassword:
 		bookmark.AuthType = "password"
-		bookmark.Password = resolveSecretValue(AM.editor.inputs[editorFieldPassword].Value(), AM.editor.original.Password)
+		bookmark.Password = AM.editor.secretValues[editorFieldPassword]
 		if strictApply {
 			bookmark.PrivateKey = ""
 			bookmark.Passphrase = ""
 		}
 	case authTypePrivateKey:
 		bookmark.AuthType = "private-key"
-		bookmark.PrivateKey = resolveSecretValue(AM.editor.inputs[editorFieldPrivateKey].Value(), AM.editor.original.PrivateKey)
-		bookmark.Passphrase = resolveSecretValue(AM.editor.inputs[editorFieldPassphrase].Value(), AM.editor.original.Passphrase)
+		bookmark.PrivateKey = AM.editor.secretValues[editorFieldPrivateKey]
+		bookmark.Passphrase = AM.editor.secretValues[editorFieldPassphrase]
 		if strictApply {
 			bookmark.Password = ""
 		}
@@ -620,6 +742,13 @@ func (am *AppModel) buildEditorOverlay(frameWidth, frameHeight int) string {
 		body.WriteString("\n")
 		if field == editorFieldAuthType {
 			body.WriteString("  " + am.editorAuthTypeView())
+		} else if field == editorFieldPrivateKey && AM.editor.showSecrets && strings.TrimSpace(AM.editor.secretValues[editorFieldPrivateKey]) != "" {
+			previewStyle := blurInputStyle
+			if isFocused {
+				previewStyle = focusInputStyle
+			}
+			preview := strings.Join(strings.Fields(strings.ReplaceAll(strings.ReplaceAll(AM.editor.secretValues[editorFieldPrivateKey], "\r\n", "\n"), "\n", " ")), " ")
+			body.WriteString("  " + previewStyle.Render(preview))
 		} else if isFocused {
 			body.WriteString("  " + focusInputStyle.Render(AM.editor.inputs[int(field)].View()))
 		} else {
@@ -637,8 +766,8 @@ func (am *AppModel) buildEditorOverlay(frameWidth, frameHeight int) string {
 		titleIcon = "+ "
 		title = am.t("Add Bookmark", "新增书签")
 	}
-	help := am.t("tab switch · m auth · ^S save · esc cancel",
-		"tab 切换 · m 认证 · ^S 保存 · esc 取消")
+	help := fmt.Sprintf(am.t("tab switch · m auth · ^S save · ^R reveal/hide %s · ^Y copy all · esc",
+		"tab 切换 · m 认证 · ^S 保存 · ^R 显示/隐藏 %s · ^Y 全部复制 · esc"), AM.editor.modeHint(am))
 	sepWidth := inputWidth + 2
 	if sepWidth > overlayWidth-2 {
 		sepWidth = overlayWidth - 2
@@ -721,13 +850,24 @@ func (am *AppModel) buildDeleteConfirmOverlay(frameWidth int) string {
 	title := lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true).Render("✗ " + am.t("Delete bookmark?", "删除书签？"))
 	entry := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render("  " + AM.pendingDelete.label)
 	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(strings.Repeat("─", overlayWidth-4))
-	help := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(am.t("y/enter confirm · n/esc cancel", "y/enter 确认 · n/esc 取消"))
-	content := lipgloss.JoinVertical(lipgloss.Left, title, sep, entry, "", help)
+	noStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Padding(0, 1)
+	yesStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Padding(0, 1)
+	noLabel := "○ " + am.t("No", "否")
+	yesLabel := "○ " + am.t("Yes", "是")
+	if AM.pendingDelete.selectYes {
+		yesStyle = yesStyle.Foreground(lipgloss.Color("16")).Background(lipgloss.Color("78")).Bold(true)
+		yesLabel = "◉ " + am.t("Yes", "是")
+	} else {
+		noStyle = noStyle.Foreground(lipgloss.Color("16")).Background(lipgloss.Color("220")).Bold(true)
+		noLabel = "◉ " + am.t("No", "否")
+	}
+	options := noStyle.Render("["+noLabel+"]") + "  " + yesStyle.Render("["+yesLabel+"]")
+	help := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(am.t("left/right switch · enter confirm (default No) · y quick yes · esc cancel", "left/right 切换 · enter 确认(默认否) · y 快速确认 · esc 取消"))
+	content := lipgloss.JoinVertical(lipgloss.Left, title, sep, entry, "", options, "", help)
 	return lipgloss.NewStyle().
 		Width(overlayWidth).
 		Padding(1, 2).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("203")).
-		Background(lipgloss.Color("236")).
 		Render(content)
 }

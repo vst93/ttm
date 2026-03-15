@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,7 +65,7 @@ func TestEnterShowsConnectingTipBeforeRunningConnectCmd(t *testing.T) {
 	AM.BookmarkInfo.List = []BookmarkItem{
 		{Title: "dev", Host: "10.0.0.1", Port: 22, Username: "root", EnableSSH: true},
 	}
-	AM.width = 100
+	AM.width = 60
 	AM.height = 30
 	createList()
 
@@ -934,6 +935,528 @@ func TestEditBookmarkKeepsMaskedSecretsWhenUnchanged(t *testing.T) {
 	}
 }
 
+func TestEditBookmarkEditorDefaultsToMaskedSecretValues(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		Password:   "plain-password",
+		AuthType:   "private-key",
+		PrivateKey: "PRIVATE KEY DATA",
+		Passphrase: "plain-passphrase",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if AM.editor == nil {
+		t.Fatalf("expected edit key to open bookmark editor")
+	}
+
+	if got := AM.editor.inputs[editorFieldPrivateKey].Value(); got != maskedSecretValue {
+		t.Fatalf("expected private key to be masked by default, got %q", got)
+	}
+	if got := AM.editor.inputs[editorFieldPassphrase].Value(); got != maskedSecretValue {
+		t.Fatalf("expected passphrase to be masked by default, got %q", got)
+	}
+}
+
+func TestConfigEditorDefaultsToMaskedTokenValue(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	am.GistConfig = GistConfig{
+		Platform: "github",
+		Token:    "ghp_plain_token",
+		GistID:   "gid-1",
+		Locale:   "en",
+	}
+	AM.Platform = "github"
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if AM.configEditor == nil {
+		t.Fatalf("expected config key to open config editor")
+	}
+
+	if got := AM.configEditor.inputs[configFieldToken].Value(); got != maskedSecretValue {
+		t.Fatalf("expected token to be masked by default, got %q", got)
+	}
+}
+
+func TestConfigEditorCanToggleTokenVisibilityWithV(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	am.GistConfig = GistConfig{
+		Platform: "github",
+		Token:    "ghp_plain_token",
+		GistID:   "gid-1",
+		Locale:   "en",
+	}
+	AM.Platform = "github"
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if AM.configEditor == nil {
+		t.Fatalf("expected config key to open config editor")
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	if got := AM.configEditor.inputs[configFieldToken].Value(); got != "ghp_plain_token" {
+		t.Fatalf("expected token to be shown after first ctrl+r toggle, got %q", got)
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	if got := AM.configEditor.inputs[configFieldToken].Value(); got != maskedSecretValue {
+		t.Fatalf("expected token to be masked after second ctrl+r toggle, got %q", got)
+	}
+}
+
+func TestBookmarkEditorCanToggleSecretVisibilityWithV(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nline-1\nline-2\n-----END OPENSSH PRIVATE KEY-----",
+		Passphrase: "plain-passphrase",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if AM.editor == nil {
+		t.Fatalf("expected edit key to open bookmark editor")
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	if got := AM.editor.inputs[editorFieldPrivateKey].Value(); !strings.Contains(got, "BEGIN OPENSSH PRIVATE KEY") || !strings.Contains(got, "line-2") || !strings.Contains(got, "END OPENSSH PRIVATE KEY") {
+		t.Fatalf("expected full private key markers after first ctrl+r toggle, got %q", got)
+	}
+	if got := AM.editor.inputs[editorFieldPassphrase].Value(); got != "plain-passphrase" {
+		t.Fatalf("expected passphrase to be shown after first ctrl+r toggle, got %q", got)
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	if got := AM.editor.inputs[editorFieldPrivateKey].Value(); got != maskedSecretValue {
+		t.Fatalf("expected private key masked after second ctrl+r toggle, got %q", got)
+	}
+	if got := AM.editor.inputs[editorFieldPassphrase].Value(); got != maskedSecretValue {
+		t.Fatalf("expected passphrase masked after second ctrl+r toggle, got %q", got)
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	if got := AM.editor.inputs[editorFieldPrivateKey].Value(); !strings.Contains(got, "BEGIN OPENSSH PRIVATE KEY") || !strings.Contains(got, "line-2") || !strings.Contains(got, "END OPENSSH PRIVATE KEY") {
+		t.Fatalf("expected full private key markers restored after third ctrl+r toggle, got %q", got)
+	}
+}
+
+func TestBookmarkEditorSaveAfterToggleKeepsFullPrivateKey(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	originalKey := "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nTAIL-MARKER-LINE\n-----END OPENSSH PRIVATE KEY-----"
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: originalKey,
+		Passphrase: "plain-passphrase",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+
+	if got := AM.BookmarkInfo.List[0].PrivateKey; got != originalKey {
+		t.Fatalf("expected private key kept intact after toggle+save, got %q", got)
+	}
+}
+
+func TestBookmarkEditorShowModeRendersFullPrivateKeyPreview(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	originalKey := "-----BEGIN OPENSSH PRIVATE KEY-----\nline-1\nline-2\n-----END OPENSSH PRIVATE KEY-----"
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: originalKey,
+		Passphrase: "plain-passphrase",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+
+	view := am.View()
+	if !strings.Contains(view, "line-1") || !strings.Contains(view, "line-2") || !strings.Contains(view, "END OPENSSH PRIVATE KEY") {
+		t.Fatalf("expected full multi-line private key preview in view, got %q", view)
+	}
+}
+
+func TestPrivateKeyPreviewStaysSingleLineAfterEnterInShowMode(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	originalKey := "-----BEGIN OPENSSH PRIVATE KEY-----\nline-1\nline-2\n-----END OPENSSH PRIVATE KEY-----"
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: originalKey,
+		Passphrase: "plain-passphrase",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	view := am.View()
+	if !strings.Contains(view, "line-1 line-2") {
+		t.Fatalf("expected single-line folded preview after enter, got %q", view)
+	}
+	if strings.Contains(view, "line-1\n") {
+		t.Fatalf("expected no multiline private key preview after enter, got %q", view)
+	}
+}
+
+func TestBookmarkEditorCtrlYCopiesFullPrivateKey(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	originalWrite := clipboardWriteAll
+	defer func() { clipboardWriteAll = originalWrite }()
+	copied := ""
+	clipboardWriteAll = func(text string) error {
+		copied = text
+		return nil
+	}
+
+	originalKey := "-----BEGIN OPENSSH PRIVATE KEY-----\nline-1\nline-2\n-----END OPENSSH PRIVATE KEY-----"
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: originalKey,
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+
+	if copied != originalKey {
+		t.Fatalf("expected ctrl+y copy full private key, got %q", copied)
+	}
+	if !strings.Contains(AM.TipString, "chars") {
+		t.Fatalf("expected copy tip to include character count, got %q", AM.TipString)
+	}
+}
+
+func TestBookmarkEditorCtrlYCopiesPrivateKeyAfterEnter(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	originalWrite := clipboardWriteAll
+	defer func() { clipboardWriteAll = originalWrite }()
+	copied := ""
+	clipboardWriteAll = func(text string) error {
+		copied = text
+		return nil
+	}
+
+	originalKey := "-----BEGIN OPENSSH PRIVATE KEY-----\nline-1\nline-2\n-----END OPENSSH PRIVATE KEY-----"
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: originalKey,
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+
+	if strings.TrimSpace(copied) == "" {
+		t.Fatalf("expected ctrl+y copy not empty after enter on private key")
+	}
+}
+
+func TestConfigEditorCtrlYCopiesToken(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	originalWrite := clipboardWriteAll
+	defer func() { clipboardWriteAll = originalWrite }()
+	copied := ""
+	clipboardWriteAll = func(text string) error {
+		copied = text
+		return nil
+	}
+
+	am.GistConfig = GistConfig{Platform: "github", Token: "ghp_plain_token", GistID: "gid-1", Locale: "en"}
+	AM.Platform = "github"
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+
+	if copied != "ghp_plain_token" {
+		t.Fatalf("expected ctrl+y copy token, got %q", copied)
+	}
+	if !strings.Contains(AM.TipString, "chars") {
+		t.Fatalf("expected copy tip to include character count, got %q", AM.TipString)
+	}
+}
+
+func TestPlainVInputDoesNotToggleConfigSecretVisibility(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	am.GistConfig = GistConfig{Platform: "github", Token: "ghp_plain_token", GistID: "gid-1", Locale: "en"}
+	AM.Platform = "github"
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if AM.configEditor == nil {
+		t.Fatalf("expected config editor open")
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	if got := AM.configEditor.inputs[configFieldToken].Value(); got != maskedSecretValue {
+		t.Fatalf("expected plain v not to toggle visibility, got %q", got)
+	}
+}
+
+func TestEditorHelpShowsCaretRShortcut(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	am.GistConfig = GistConfig{Platform: "github", Token: "ghp_plain_token", GistID: "gid-1", Locale: "en"}
+	AM.Platform = "github"
+	AM.BookmarkInfo.List = []BookmarkItem{{Title: "dev", Host: "10.0.0.1", Username: "root", Port: 22, EnableSSH: true}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	configView := am.View()
+	if !strings.Contains(configView, "^R") {
+		t.Fatalf("expected config editor help to show ^R")
+	}
+	if !strings.Contains(configView, "^Y") {
+		t.Fatalf("expected config editor help to show ^Y")
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	bookmarkView := am.View()
+	if !strings.Contains(bookmarkView, "^R") {
+		t.Fatalf("expected bookmark editor help to show ^R")
+	}
+	if !strings.Contains(bookmarkView, "^Y") {
+		t.Fatalf("expected bookmark editor help to show ^Y")
+	}
+}
+
+func TestEditorHelpShowsCurrentRevealMode(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	am.GistConfig = GistConfig{Platform: "github", Token: "ghp_plain_token", GistID: "gid-1", Locale: "en"}
+	AM.Platform = "github"
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "dev",
+		Host:       "10.0.0.1",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "KEY",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if !strings.Contains(am.View(), "^R reveal/hide") || !strings.Contains(strings.ToLower(am.View()), "hidden") {
+		t.Fatalf("expected config editor to show inline reveal mode in help")
+	}
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	if !strings.Contains(am.View(), "^R reveal/hide") || !strings.Contains(strings.ToLower(am.View()), "shown") {
+		t.Fatalf("expected config editor to show inline shown mode after ^R")
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if AM.editor == nil || AM.editor.showSecrets {
+		t.Fatalf("expected bookmark editor default hidden mode")
+	}
+	if !strings.Contains(am.View(), "^R reveal/hide") || !strings.Contains(strings.ToLower(am.View()), "hidden") {
+		t.Fatalf("expected bookmark editor to show inline reveal mode in help")
+	}
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	if !AM.editor.showSecrets {
+		t.Fatalf("expected bookmark editor switched to shown mode after ^R")
+	}
+	if !strings.Contains(am.View(), "^R reveal/hide") || !strings.Contains(strings.ToLower(am.View()), "shown") {
+		t.Fatalf("expected bookmark editor to show inline shown mode after ^R")
+	}
+}
+
+func TestModeHintUsesColorStyling(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	ce := newConfigEditor(GistConfig{Platform: "github", Token: "x", GistID: "gid", Locale: "en"})
+	ce.showSecrets = false
+	hidden := ce.modeHint(am)
+	ce.showSecrets = true
+	shown := ce.modeHint(am)
+	if !strings.Contains(strings.ToLower(hidden), "hidden") || !strings.Contains(strings.ToLower(shown), "shown") {
+		t.Fatalf("expected hidden/shown mode hints, hidden=%q shown=%q", hidden, shown)
+	}
+	if hidden == shown {
+		t.Fatalf("expected hidden and shown mode hints to have distinct styling")
+	}
+
+	be := newBookmarkEditor(editorModeAdd, 0, BookmarkItem{AuthType: "private-key"})
+	be.showSecrets = false
+	bHidden := be.modeHint(am)
+	be.showSecrets = true
+	bShown := be.modeHint(am)
+	if !strings.Contains(strings.ToLower(bHidden), "hidden") || !strings.Contains(strings.ToLower(bShown), "shown") {
+		t.Fatalf("expected hidden/shown bookmark hints, hidden=%q shown=%q", bHidden, bShown)
+	}
+	if bHidden == bShown {
+		t.Fatalf("expected bookmark hidden and shown hints to have distinct styling")
+	}
+}
+
+func TestConfigEditorEmptyTokenAutoRevealsOnType(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	am.GistConfig = GistConfig{Platform: "github", Token: "", GistID: "gid-1", Locale: "en"}
+	AM.Platform = "github"
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+
+	if !AM.configEditor.showSecrets {
+		t.Fatalf("expected empty token field typing to auto reveal mode")
+	}
+	if got := AM.configEditor.inputs[configFieldToken].Value(); got != "a" {
+		t.Fatalf("expected typing to work on empty token without manual ^R, got %q", got)
+	}
+}
+
+func TestBookmarkEditorEmptyPrivateKeyAutoRevealsOnType(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "",
+		Passphrase: "",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+
+	if !AM.editor.showSecrets {
+		t.Fatalf("expected empty private key typing to auto reveal mode")
+	}
+	if got := AM.editor.inputs[editorFieldPrivateKey].Value(); got != "A" {
+		t.Fatalf("expected typing to work on empty private key without manual ^R, got %q", got)
+	}
+}
+
 func TestDeleteBookmarkConfirmationRemovesSelectedItem(t *testing.T) {
 	AM = AppModel{}
 	am := &AM
@@ -1379,5 +1902,243 @@ func TestPageWrapsFromFirstToLast(t *testing.T) {
 
 	if AM.list.Paginator.Page != lastPage {
 		t.Fatalf("expected page to wrap to %d, got %d", lastPage, AM.list.Paginator.Page)
+	}
+}
+
+func TestSyncPushRequiresConfirmAndDefaultsToNoOnEnter(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	AM.Token = "token"
+	AM.GistID = "gid"
+	AM.BookmarkInfo.List = []BookmarkItem{
+		{Title: "dev", Host: "10.0.0.1", Port: 22, Username: "root", EnableSSH: true},
+	}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	if AM.isSyncing {
+		t.Fatalf("expected pressing s to open confirm first, not start syncing")
+	}
+
+	view := am.View()
+	if !strings.Contains(view, "WARNING") {
+		t.Fatalf("expected obvious warning in sync confirm, got: %q", view)
+	}
+	if !strings.Contains(view, "No") {
+		t.Fatalf("expected sync confirm to render No option by default")
+	}
+	if !strings.Contains(view, "Upload local bookmarks to remote Gist") {
+		t.Fatalf("expected clearer push explanation in sync confirm, got: %q", view)
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if AM.isSyncing {
+		t.Fatalf("expected enter on default No to cancel syncing")
+	}
+	if !strings.Contains(strings.ToLower(AM.TipString), "cancel") {
+		t.Fatalf("expected cancel tip after default-no enter, got %q", AM.TipString)
+	}
+}
+
+func TestSyncPullCanConfirmWithY(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	AM.Token = "token"
+	AM.GistID = "gid"
+	AM.BookmarkInfo.List = []BookmarkItem{
+		{Title: "dev", Host: "10.0.0.1", Port: 22, Username: "root", EnableSSH: true},
+	}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	if AM.isSyncing {
+		t.Fatalf("expected pressing S to open confirm first, not start syncing")
+	}
+	if view := am.View(); !strings.Contains(view, "Download from remote Gist and overwrite local bookmarks") {
+		t.Fatalf("expected clearer pull explanation in sync confirm, got: %q", view)
+	}
+
+	_, cmd := am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if !AM.isSyncing {
+		t.Fatalf("expected y to confirm sync and start syncing")
+	}
+	if cmd == nil {
+		t.Fatalf("expected confirmed sync to return async command")
+	}
+}
+
+func TestSyncPushAllowsEmptyGistIDForFirstCreate(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	AM.Token = "token"
+	AM.GistID = ""
+	AM.BookmarkInfo.List = []BookmarkItem{{Title: "dev", Host: "10.0.0.1", Port: 22, Username: "root", EnableSSH: true}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	if AM.pendingSync == nil {
+		t.Fatalf("expected push to open confirm even when gist_id is empty")
+	}
+	if strings.Contains(strings.ToLower(AM.TipString), "gist_id") {
+		t.Fatalf("expected no gist_id warning for push-first-create flow, got %q", AM.TipString)
+	}
+}
+
+func TestSyncPullRequiresGistID(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	AM.Token = "token"
+	AM.GistID = ""
+	AM.BookmarkInfo.List = []BookmarkItem{{Title: "dev", Host: "10.0.0.1", Port: 22, Username: "root", EnableSSH: true}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	if AM.pendingSync != nil {
+		t.Fatalf("expected pull not to open confirm when gist_id is empty")
+	}
+	if !strings.Contains(strings.ToLower(AM.TipString), "gist_id") {
+		t.Fatalf("expected gist_id warning for pull without gist_id, got %q", AM.TipString)
+	}
+}
+
+func TestSyncConfirmViewUsesOptionBackgroundHighlight(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	AM.Token = "token"
+	AM.GistID = "gid"
+	AM.BookmarkInfo.List = []BookmarkItem{
+		{Title: "dev", Host: "10.0.0.1", Port: 22, Username: "root", EnableSSH: true},
+	}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	view := am.View()
+
+	if !strings.Contains(view, "◉") {
+		t.Fatalf("expected sync confirm selected option indicator, got %q", view)
+	}
+}
+
+func TestSyncConfirmOverlayUsesOptionBackgroundHighlight(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	AM.pendingSync = &syncConfirmState{action: syncActionPush, selectYes: false}
+
+	overlay := am.buildSyncConfirmOverlay(100)
+	if !strings.Contains(overlay, "◉") {
+		t.Fatalf("expected sync confirm overlay to include option selection indicator, got %q", overlay)
+	}
+}
+
+func TestDeleteConfirmDefaultsToNoOnEnter(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:     "dev",
+		Host:      "10.0.0.1",
+		Username:  "root",
+		Port:      22,
+		EnableSSH: true,
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if AM.pendingDelete == nil {
+		t.Fatalf("expected delete key to open confirmation modal")
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if len(AM.BookmarkInfo.List) != 1 {
+		t.Fatalf("expected default-no enter to keep bookmark, got %d", len(AM.BookmarkInfo.List))
+	}
+	if !strings.Contains(strings.ToLower(AM.TipString), "cancel") {
+		t.Fatalf("expected cancel tip after default-no enter, got %q", AM.TipString)
+	}
+}
+
+func TestDeleteConfirmOverlayUsesOptionBackgroundHighlight(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	AM.pendingDelete = &deleteConfirmState{index: 0, label: "dev (root@10.0.0.1:22)"}
+
+	overlay := am.buildDeleteConfirmOverlay(100)
+	if !strings.Contains(overlay, "◉") {
+		t.Fatalf("expected delete confirm overlay to include option selection indicator, got %q", overlay)
+	}
+}
+
+func TestSyncUploadMsgPersistsGistIDWhenAlreadySetInMemory(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	dir := t.TempDir()
+	APP_DIR = dir
+	ConfigFile = filepath.Join(dir, "config.json")
+
+	am.GistConfig = GistConfig{
+		Platform: "github",
+		Token:    "token-1",
+		GistID:   "",
+		Locale:   "en",
+	}
+	if err := SaveConfig(am.GistConfig); err != nil {
+		t.Fatalf("failed to seed config: %v", err)
+	}
+
+	AM.BookmarkInfo.List = []BookmarkItem{{Title: "dev", Host: "10.0.0.1", Username: "root", Port: 22, EnableSSH: true}}
+	AM.GistID = "new-gist-id"
+
+	_, _ = am.Update(syncUploadMsg{Err: nil, GistID: "new-gist-id"})
+
+	data, err := os.ReadFile(ConfigFile)
+	if err != nil {
+		t.Fatalf("failed to read config file: %v", err)
+	}
+	var cfg GistConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("failed to parse config file: %v", err)
+	}
+	if cfg.GistID != "new-gist-id" {
+		t.Fatalf("expected persisted gist_id to be new-gist-id, got %q", cfg.GistID)
+	}
+}
+
+func TestSyncUploadMsgReturnsErrorTipWhenConfigPersistFails(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	dir := t.TempDir()
+	APP_DIR = dir
+	ConfigFile = filepath.Join(dir, "missing", "config.json")
+
+	am.GistConfig = GistConfig{
+		Platform: "github",
+		Token:    "token-1",
+		GistID:   "old-gist-id",
+		Locale:   "en",
+	}
+	AM.BookmarkInfo.List = []BookmarkItem{{Title: "dev", Host: "10.0.0.1", Username: "root", Port: 22, EnableSSH: true}}
+
+	_, _ = am.Update(syncUploadMsg{Err: nil, GistID: "new-gist-id"})
+
+	if !strings.Contains(AM.TipString, "write config") {
+		t.Fatalf("expected config persist error tip, got %q", AM.TipString)
 	}
 }

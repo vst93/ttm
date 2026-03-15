@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -21,28 +22,73 @@ type configEditor struct {
 	focusIndex    int
 	scroll        int
 	scrollToFocus bool
+	showSecrets   bool
+	tokenValue    string
 	inputs        []textinput.Model
 	original      GistConfig
 	viewport      viewport.Model
 }
 
 func newConfigEditor(config GistConfig) *configEditor {
-	token := ""
-	if strings.TrimSpace(config.Token) != "" {
-		token = maskedSecretValue
-	}
-
 	editor := &configEditor{
-		original: config,
+		showSecrets: false,
+		tokenValue:  config.Token,
+		original:    config,
 		inputs: []textinput.Model{
 			buildEditorInput("", "platform"),
-			buildEditorInput(token, "ghp_xxxx..."),
+			buildEditorInput("", "ghp_xxxx..."),
 			buildEditorInput(config.GistID, "abc123def456"),
 		},
 	}
 	editor.inputs[configFieldPlatform].Blur()
 	editor.setFocus(1)
+	editor.applySecretVisibility()
 	return editor
+}
+
+func (ce *configEditor) applySecretVisibility() {
+	if ce.showSecrets {
+		ce.inputs[configFieldToken].SetValue(ce.tokenValue)
+		ce.inputs[configFieldToken].CursorStart()
+		return
+	}
+	if strings.TrimSpace(ce.tokenValue) == "" {
+		ce.inputs[configFieldToken].SetValue("")
+		ce.inputs[configFieldToken].CursorStart()
+		return
+	}
+	ce.inputs[configFieldToken].SetValue(maskedSecretValue)
+	ce.inputs[configFieldToken].CursorStart()
+}
+
+func (ce *configEditor) toggleSecretVisibility() {
+	ce.showSecrets = !ce.showSecrets
+	ce.applySecretVisibility()
+}
+
+func (ce *configEditor) fieldValueForCopy(field configField) string {
+	if field == configFieldToken {
+		if strings.TrimSpace(ce.tokenValue) != "" {
+			return ce.tokenValue
+		}
+		inputValue := ce.inputs[int(field)].Value()
+		if strings.TrimSpace(inputValue) != "" && strings.TrimSpace(inputValue) != maskedSecretValue {
+			return inputValue
+		}
+		if strings.TrimSpace(ce.original.Token) != "" {
+			return ce.original.Token
+		}
+		return ""
+	}
+	return ce.inputs[int(field)].Value()
+}
+
+func (ce *configEditor) modeHint(am *AppModel) string {
+	base := lipgloss.NewStyle().Bold(true).Padding(0, 1)
+	if ce.showSecrets {
+		return base.Foreground(lipgloss.Color("16")).Background(lipgloss.Color("78")).Render(am.t("SHOWN", "显示"))
+	}
+	return base.Foreground(lipgloss.Color("16")).Background(lipgloss.Color("220")).Render(am.t("HIDDEN", "隐藏"))
 }
 
 func (ce *configEditor) platformText() string {
@@ -135,6 +181,7 @@ func (am *AppModel) openConfigEditor() tea.Cmd {
 	AM.configEditor = newConfigEditor(am.GistConfig)
 	AM.editor = nil
 	AM.pendingDelete = nil
+	AM.pendingSync = nil
 	return AM.configEditor.setFocus(1)
 }
 
@@ -161,6 +208,19 @@ func (am *AppModel) handleConfigEditorKey(msg tea.KeyMsg) tea.Cmd {
 			AM.configEditor.cyclePlatform()
 			return AM.configEditor.setFocus(AM.configEditor.focusIndex)
 		}
+	case "ctrl+r":
+		AM.configEditor.toggleSecretVisibility()
+		return nil
+	case "ctrl+y":
+		focused := AM.configEditor.focusedField()
+		value := AM.configEditor.fieldValueForCopy(focused)
+		if strings.TrimSpace(value) == "" {
+			return setTip(am.t("nothing to copy", "没有可复制内容"), tipInfo)
+		}
+		if err := clipboardWriteAll(value); err != nil {
+			return setTip(am.t("copy failed: ", "复制失败: ")+err.Error(), tipError)
+		}
+		return setTip(fmt.Sprintf(am.t("copied %d chars", "已复制 %d 个字符"), len([]rune(value))), tipSuccess)
 	case "ctrl+s":
 		return am.saveConfigEditor()
 	}
@@ -169,9 +229,23 @@ func (am *AppModel) handleConfigEditorKey(msg tea.KeyMsg) tea.Cmd {
 	if focused == configFieldPlatform {
 		return nil
 	}
+	if focused == configFieldToken && !AM.configEditor.showSecrets {
+		if strings.TrimSpace(AM.configEditor.fieldValueForCopy(configFieldToken)) == "" {
+			AM.configEditor.showSecrets = true
+			AM.configEditor.applySecretVisibility()
+		} else {
+			return setTip(am.t("press ^R to reveal token before editing", "编辑前请按 ^R 显示令牌"), tipInfo)
+		}
+	}
 	idx := int(focused)
 	updated, cmd := AM.configEditor.inputs[idx].Update(msg)
 	AM.configEditor.inputs[idx] = updated
+	if focused == configFieldToken {
+		value := AM.configEditor.inputs[idx].Value()
+		if strings.TrimSpace(value) != maskedSecretValue || strings.TrimSpace(AM.configEditor.tokenValue) == "" {
+			AM.configEditor.tokenValue = value
+		}
+	}
 	return cmd
 }
 
@@ -180,10 +254,10 @@ func (am *AppModel) saveConfigEditor() tea.Cmd {
 		return nil
 	}
 
-	token := resolveSecretValue(
-		AM.configEditor.inputs[configFieldToken].Value(),
-		AM.configEditor.original.Token,
-	)
+	if AM.configEditor.showSecrets {
+		AM.configEditor.tokenValue = AM.configEditor.inputs[configFieldToken].Value()
+	}
+	token := AM.configEditor.tokenValue
 	gistID := strings.TrimSpace(AM.configEditor.inputs[configFieldGistID].Value())
 
 	am.GistConfig.Token = token
@@ -273,8 +347,8 @@ func (am *AppModel) buildConfigEditorOverlay(frameWidth, frameHeight int) string
 	bodyText := body.String()
 
 	title := am.t("Sync Config", "同步配置")
-	help := am.t("tab switch · ^S save · esc cancel",
-		"tab 切换 · ^S 保存 · esc 取消")
+	help := fmt.Sprintf(am.t("tab switch · ^S save · ^R reveal/hide %s · ^Y copy all · esc",
+		"tab 切换 · ^S 保存 · ^R 显示/隐藏 %s · ^Y 全部复制 · esc"), AM.configEditor.modeHint(am))
 	sepWidth := inputWidth + 2
 	if sepWidth > overlayWidth-2 {
 		sepWidth = overlayWidth - 2
