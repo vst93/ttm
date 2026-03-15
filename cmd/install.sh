@@ -1,122 +1,206 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-set -e
+set -euo pipefail
 
-# 配置信息
-REPO="https://github.com/vst93/ttm"
+REPO_OWNER="vst93"
+REPO_NAME="ttm"
 BINARY_NAME="ttm"
-TEMP_DIR=$(mktemp -d)
+REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}"
+API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest"
+FORCE_INSTALL="${FORCE_INSTALL:-0}"
 
+TEMP_DIR=""
 
-# 使用GitHub API获取最新的发行版信息（里边有最新的版本号标识）
-response=$(curl -s https://api.github.com/repos/vst93/$BINARY_NAME/releases/latest)
-# 提取下载链接 （tag_name属性即为版本号属性 cut命令获取版本号属性的值 awk命令把版本号中的v字符删除）
-VERSION=$(echo "$response" | grep 'tag_name' | cut -d'"' -f4)
+log_info() {
+    printf '[INFO] %s\n' "$*"
+}
 
+log_warn() {
+    printf '[WARN] %s\n' "$*" >&2
+}
 
-# 确定安装目录
-determine_install_dir() {
-    # 优先级：用户指定 > /usr/local/bin > ~/.local/bin > ~/bin
-    local install_dir=""
-    
-    # 1. 检查用户是否指定了安装目录
-    if [ -n "$INSTALL_DIR" ]; then
-        install_dir="$INSTALL_DIR"
-        echo "使用用户指定的安装目录: $install_dir"
-        echo "$install_dir"
+log_error() {
+    printf '[ERROR] %s\n' "$*" >&2
+}
+
+cleanup() {
+    if [ -n "$TEMP_DIR" ]; then
+        rm -rf "$TEMP_DIR"
+    fi
+}
+
+trap cleanup EXIT
+
+is_termux() {
+    [ -n "${TERMUX_VERSION:-}" ] || [ "${PREFIX:-}" = "/data/data/com.termux/files/usr" ] || [ -d "/data/data/com.termux/files/usr" ]
+}
+
+is_interactive() {
+    [ -t 0 ]
+}
+
+has_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+print_help() {
+    cat <<EOF
+Usage: ${BINARY_NAME}-install [OPTIONS]
+
+Install latest ${BINARY_NAME} release for current platform.
+
+Options:
+  -h, --help                Show this help and exit
+      --install-dir <dir>   Override install directory
+      --force               Continue install when checksum fetch/verify fails
+
+Environment variables:
+  INSTALL_DIR      Same as --install-dir
+  FORCE_INSTALL=1  Same as --force
+EOF
+}
+
+parse_args() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -h|--help)
+                print_help
+                exit 0
+                ;;
+            --install-dir)
+                if [ "$#" -lt 2 ]; then
+                    log_error "--install-dir 需要传入目录路径"
+                    exit 2
+                fi
+                INSTALL_DIR="$2"
+                shift
+                ;;
+            --force)
+                FORCE_INSTALL="1"
+                ;;
+            *)
+                log_error "未知参数: $1"
+                log_error "可用参数: --help, --install-dir <dir>, --force"
+                exit 2
+                ;;
+        esac
+        shift
+    done
+}
+
+init_temp_dir() {
+    TEMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t ttm)"
+}
+
+require_download_tool() {
+    if has_cmd curl || has_cmd wget; then
         return 0
     fi
-    
-    # 2. 检查 /usr/local/bin
-    if [ -d "/usr/local/bin" ]; then
-        if [ -w "/usr/local/bin" ]; then
-            echo "/usr/local/bin"
-            return 0
-        fi
-    fi
-    
-    # 3. 检查 ~/../usr/local/bin (用户主目录上级的usr/local/bin)
-    local home_parent_local="${HOME%/*}/usr/local/bin"
-    if [ -n "$HOME" ] && [ -d "$home_parent_local" ]; then
-        if [ -w "$home_parent_local" ]; then
-            echo "$home_parent_local"
-            return 0
-        fi
-    fi
-    
-    # 4. 检查 ~/.local/bin (用户本地目录)
-    local user_local_bin="$HOME/.local/bin"
-    if [ -n "$HOME" ]; then
-        echo "$user_local_bin"
-        return 0
-    fi
-    
-    # 5. 最后尝试 ~/bin
-    if [ -n "$HOME" ]; then
-        echo "$HOME/bin"
-        return 0
-    fi
 
-    # 如果所有选项都失败
-    echo "错误: 无法确定安装目录"
+    log_error "需要 curl 或 wget 用于下载"
     exit 1
 }
 
-# 清理函数
-cleanup() {
-    echo "清理临时文件..."
-    rm -rf "$TEMP_DIR"
+require_extract_tool() {
+    if has_cmd unzip; then
+        return 0
+    fi
+
+    log_error "需要 unzip 用于解压发布包"
+    if is_termux; then
+        log_info "Termux 可运行: pkg install unzip"
+    fi
+    exit 1
 }
 
-# 错误处理
-trap cleanup EXIT
-trap 'echo "安装过程中出现错误"; exit 1' ERR
+download_file() {
+    local url="$1"
+    local output_file="$2"
 
-# 检测系统平台和架构
+    if has_cmd curl; then
+        curl -fsSL --retry 3 --retry-delay 1 -o "$output_file" "$url"
+    elif has_cmd wget; then
+        wget -q -O "$output_file" "$url"
+    else
+        log_error "需要 curl 或 wget 用于下载"
+        exit 1
+    fi
+
+    if [ ! -s "$output_file" ]; then
+        log_error "下载失败或文件为空: $url"
+        exit 1
+    fi
+}
+
+fetch_latest_version() {
+    local response
+    local version
+
+    if has_cmd curl; then
+        response="$(curl -fsSL "$API_URL")"
+    elif has_cmd wget; then
+        response="$(wget -q -O - "$API_URL")"
+    else
+        log_error "需要 curl 或 wget 用于获取版本信息"
+        exit 1
+    fi
+
+    version="$(printf '%s\n' "$response" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+
+    if [ -z "$version" ]; then
+        log_error "无法从 GitHub API 解析最新版本号"
+        exit 1
+    fi
+
+    VERSION="$version"
+}
+
 detect_platform() {
-    OS=""
-    ARCH=""
-    
-    # 检测操作系统
-    case "$(uname -o)" in
+    local uname_s uname_m
+
+    uname_s="$(uname -s)"
+    uname_m="$(uname -m)"
+
+    case "$uname_s" in
         Darwin)
             OS="darwin"
             ;;
-        GNU/Linux)
-            OS="linux"
-            ;;
-        Android)
-            OS="android"
+        Linux)
+            if is_termux; then
+                OS="android"
+            else
+                OS="linux"
+            fi
             ;;
         *)
-            echo "不支持的操作系统: $(uname -o)"
+            log_error "不支持的操作系统: $uname_s"
             exit 1
             ;;
     esac
-    
-    # 检测CPU架构
-    case "$(uname -m)" in
+
+    case "$uname_m" in
         x86_64|amd64)
             ARCH="amd64"
             ;;
-        arm64|aarch64)
+        aarch64|arm64)
             ARCH="arm64"
             ;;
+        armv7l|armv8l|arm)
+            log_error "暂不支持 32 位 ARM 架构: $uname_m"
+            log_error "请使用 arm64 设备，或从源码构建"
+            exit 1
+            ;;
         *)
-            echo "不支持的CPU架构: $(uname -m)"
+            log_error "不支持的 CPU 架构: $uname_m"
             exit 1
             ;;
     esac
-    
-    echo "检测到系统: $OS-$ARCH"
+
+    log_info "检测到系统: ${OS}-${ARCH}"
 }
 
-# 构建下载URL
 get_download_info() {
-    local os="$1"
-    local arch="$2"
-    
-    case "$os-$arch" in
+    case "${OS}-${ARCH}" in
         darwin-arm64)
             FILENAME="ttm-darwin-arm64.zip"
             ;;
@@ -136,221 +220,228 @@ get_download_info() {
             FILENAME="ttm-android-amd64.zip"
             ;;
         *)
-            echo "没有找到适用于 $os-$arch 的版本"
+            log_error "没有找到适用于 ${OS}-${ARCH} 的发布包"
             exit 1
             ;;
     esac
-    
-    DOWNLOAD_URL="${REPO}/releases/download/${VERSION}/${FILENAME}"
+
+    DOWNLOAD_URL="${REPO_URL}/releases/download/${VERSION}/${FILENAME}"
 }
 
-# 下载文件
-download_file() {
-    local url="$1"
-    local output_file="$2"
-    
-    # echo "正在下载: $url"
-    
-    if command -v curl &> /dev/null; then
-        curl -L -o "$output_file" "$url"
-    elif command -v wget &> /dev/null; then
-        wget -O "$output_file" "$url"
-    else
-        echo "错误: 需要curl或wget进行下载"
-        exit 1
-    fi
-    
-    # 检查下载是否成功
-    if [ ! -f "$output_file" ] || [ ! -s "$output_file" ]; then
-        echo "错误: 文件下载失败或为空"
-        exit 1
-    fi
-}
-
-# 获取SHA256校验值
 get_sha256_hash() {
     local sha256_url="$1"
-    local temp_sha_file="$TEMP_DIR/$(basename "$sha256_url")"
-    
-    # 下载SHA256文件
-    download_file "$sha256_url" "$temp_sha_file"
-    
-    # 从SHA256文件中提取校验值
-    # SHA256文件格式通常是: "hash filename" 或只有 "hash"
-    if grep -q " " "$temp_sha_file"; then
-        # 格式为 "hash filename"，提取第一个字段
-        cut -d ' ' -f 1 "$temp_sha_file"
+    local sha_file="$TEMP_DIR/${FILENAME}.sha256"
+
+    download_file "$sha256_url" "$sha_file"
+    awk '{print $1}' "$sha_file"
+}
+
+compute_sha256() {
+    local file="$1"
+
+    if has_cmd sha256sum; then
+        sha256sum "$file" | awk '{print $1}'
+    elif has_cmd shasum; then
+        shasum -a 256 "$file" | awk '{print $1}'
+    elif has_cmd openssl; then
+        openssl dgst -sha256 "$file" | awk '{print $NF}'
     else
-        # 格式为只有 "hash"
-        cat "$temp_sha_file"
+        return 1
     fi
 }
 
-# 验证SHA256
 verify_sha256() {
     local file="$1"
     local expected_sha="$2"
-    
-    if ! command -v shasum &> /dev/null && ! command -v sha256sum &> /dev/null; then
-        echo "警告: 找不到shasum或sha256sum命令，跳过校验"
+    local actual_sha
+
+    if ! actual_sha="$(compute_sha256 "$file")"; then
+        log_warn "未找到可用 SHA256 工具，跳过校验"
         return 0
     fi
-    
-    local actual_sha=""
-    if command -v shasum &> /dev/null; then
-        actual_sha=$(shasum -a 256 "$file" | cut -d ' ' -f1)
-    elif command -v sha256sum &> /dev/null; then
-        actual_sha=$(sha256sum "$file" | cut -d ' ' -f1)
-    fi
-    
+
     if [ "$actual_sha" != "$expected_sha" ]; then
-        echo "SHA256校验失败!"
-        echo "期望: $expected_sha"
-        echo "实际: $actual_sha"
+        log_error "SHA256 校验失败"
+        log_error "期望: $expected_sha"
+        log_error "实际: $actual_sha"
         return 1
     fi
-    
-    echo "SHA256校验通过"
-    return 0
+
+    log_info "SHA256 校验通过"
 }
 
-# 确保目录存在并返回是否需要sudo
-ensure_dir_exists() {
-    local dir="$1"
-    
-    if [ ! -d "$dir" ]; then
-        echo "创建目录: $dir"
-        # 尝试创建目录
-        if mkdir -p "$dir" 2>/dev/null; then
-            echo "目录创建成功"
-            return 0  # 不需要sudo
-        else
-            echo "需要sudo权限创建目录"
-            if sudo mkdir -p "$dir"; then
-                return 1  # 需要sudo
-            else
-                echo "无法创建目录: $dir"
+prompt_continue_or_abort() {
+    local reason="$1"
+
+    if [ "$FORCE_INSTALL" = "1" ]; then
+        log_warn "$reason，FORCE_INSTALL=1，继续安装"
+        return 0
+    fi
+
+    if is_interactive; then
+        printf '%s，是否继续安装? (y/N): ' "$reason"
+        read -r reply
+        case "$reply" in
+            y|Y|yes|YES)
+                return 0
+                ;;
+            *)
+                log_error "安装已取消"
                 exit 1
-            fi
-        fi
+                ;;
+        esac
     else
-        # 检查写权限
-        if [ -w "$dir" ]; then
-            return 0  # 不需要sudo
-        else
-            echo "目录 $dir 存在但无写权限"
-            return 1  # 需要sudo
-        fi
+        log_error "$reason，非交互环境下默认中止。可设置 FORCE_INSTALL=1 强制继续"
+        exit 1
     fi
 }
 
-# 安装二进制文件
+determine_install_dir() {
+    if [ -n "${INSTALL_DIR:-}" ]; then
+        printf '%s\n' "$INSTALL_DIR"
+        return
+    fi
+
+    if is_termux && [ -n "${PREFIX:-}" ]; then
+        printf '%s\n' "$PREFIX/bin"
+        return
+    fi
+
+    if [ -d "/usr/local/bin" ] && { [ -w "/usr/local/bin" ] || { ! is_termux && has_cmd sudo; }; }; then
+        printf '%s\n' "/usr/local/bin"
+        return
+    fi
+
+    if [ -n "${HOME:-}" ]; then
+        printf '%s\n' "$HOME/.local/bin"
+        return
+    fi
+
+    log_error "无法确定安装目录"
+    exit 1
+}
+
+ensure_dir_exists() {
+    local dir="$1"
+
+    if [ -d "$dir" ]; then
+        return 0
+    fi
+
+    if mkdir -p "$dir" 2>/dev/null; then
+        return 0
+    fi
+
+    if is_termux; then
+        log_error "无法创建目录: $dir"
+        exit 1
+    fi
+
+    if has_cmd sudo; then
+        sudo mkdir -p "$dir" || {
+            log_error "sudo 创建目录失败: $dir"
+            exit 1
+        }
+        return 0
+    fi
+
+    log_error "无法创建目录且缺少 sudo: $dir"
+    exit 1
+}
+
 install_binary() {
     local zip_file="$1"
     local install_dir="$2"
-    
-    echo "解压文件..."
-    unzip -q "$zip_file" -d "$TEMP_DIR"
-    
-    local binary_path="$TEMP_DIR/$BINARY_NAME"
-    
+    local extracted_dir="$TEMP_DIR/extracted"
+    local binary_path
+
+    mkdir -p "$extracted_dir"
+    unzip -q "$zip_file" -d "$extracted_dir"
+
+    binary_path="$extracted_dir/$BINARY_NAME"
     if [ ! -f "$binary_path" ]; then
-        echo "错误: 在压缩包中找不到 $BINARY_NAME"
+        log_error "在压缩包中找不到 $BINARY_NAME"
         exit 1
     fi
-    
-    echo "安装到 $install_dir"
+
     chmod +x "$binary_path"
-    
-    # 确保安装目录存在并检查权限
-    if ensure_dir_exists "$install_dir"; then
-        # 不需要sudo
-        mv "$binary_path" "$install_dir/"
-        echo "文件移动成功"
-    else
-        # 需要sudo
-        echo "需要sudo权限写入 $install_dir"
-        sudo mv "$binary_path" "$install_dir/"
-        echo "文件移动成功 (使用sudo)"
-    fi
-    
-    # 验证安装
-    if command -v "$BINARY_NAME" &> /dev/null; then
-        echo "安装成功!"
-        echo "$BINARY_NAME 版本: $($BINARY_NAME --version 2>/dev/null || echo '已安装')"
-    else
-        echo "注意: $BINARY_NAME 可能不在你的PATH中"
-        echo "安装位置: $install_dir"
-        echo "请确保 $install_dir 在你的PATH环境变量中"
-        
-        # 提供添加PATH的建议
-        local shell_rc=""
-        if [ -f "$HOME/.bashrc" ]; then
-            shell_rc="~/.bashrc"
-        elif [ -f "$HOME/.zshrc" ]; then
-            shell_rc="~/.zshrc"
-        elif [ -f "$HOME/.profile" ]; then
-            shell_rc="~/.profile"
+    ensure_dir_exists "$install_dir"
+
+    if [ -w "$install_dir" ]; then
+        if has_cmd install; then
+            install -m 0755 "$binary_path" "$install_dir/$BINARY_NAME"
+        else
+            cp "$binary_path" "$install_dir/$BINARY_NAME"
+            chmod 0755 "$install_dir/$BINARY_NAME"
         fi
-        
-        if [ -n "$shell_rc" ]; then
-            echo ""
-            echo "你可以运行以下命令将其添加到PATH:"
-            echo "  echo 'export PATH=\"$install_dir:\$PATH\"' >> $shell_rc"
-            echo "然后重新加载配置: source $shell_rc"
+    elif ! is_termux && has_cmd sudo; then
+        if has_cmd install; then
+            sudo install -m 0755 "$binary_path" "$install_dir/$BINARY_NAME" || {
+                log_error "sudo 安装失败: $install_dir/$BINARY_NAME"
+                exit 1
+            }
+        else
+            sudo cp "$binary_path" "$install_dir/$BINARY_NAME" || {
+                log_error "sudo 复制失败: $install_dir/$BINARY_NAME"
+                exit 1
+            }
+            sudo chmod 0755 "$install_dir/$BINARY_NAME" || {
+                log_error "sudo chmod 失败: $install_dir/$BINARY_NAME"
+                exit 1
+            }
         fi
+    else
+        log_error "目录不可写且无法提权: $install_dir"
+        exit 1
     fi
+
+    if [ -x "$install_dir/$BINARY_NAME" ]; then
+        log_info "安装成功: $install_dir/$BINARY_NAME"
+        "$install_dir/$BINARY_NAME" --version 2>/dev/null || true
+    else
+        log_error "安装后未找到可执行文件"
+        exit 1
+    fi
+
+    case ":$PATH:" in
+        *":$install_dir:"*)
+            ;;
+        *)
+            log_warn "$install_dir 不在 PATH 中，请手动添加"
+            ;;
+    esac
 }
 
-# 主安装流程
 main() {
-    echo "开始安装 $BINARY_NAME $VERSION"
-    
-    # 确定安装目录
-    INSTALL_DIR=$(determine_install_dir)
-    echo "最终安装目录: $INSTALL_DIR"
-    
-    # 检测平台
+    parse_args "$@"
+    init_temp_dir
+
+    require_download_tool
+    require_extract_tool
+    fetch_latest_version
     detect_platform
-    
-    # 获取下载信息
-    get_download_info "$OS" "$ARCH"
-    
-    echo "下载地址: $DOWNLOAD_URL"
-    
-    # 下载文件
+
+    INSTALL_PATH="$(determine_install_dir)"
+    log_info "开始安装 ${BINARY_NAME} ${VERSION}"
+    log_info "安装目录: $INSTALL_PATH"
+
+    get_download_info
+    log_info "下载地址: $DOWNLOAD_URL"
+
     local zip_file="$TEMP_DIR/$FILENAME"
     download_file "$DOWNLOAD_URL" "$zip_file"
-    
-    # 获取并验证SHA256
-    local sha256_url="${DOWNLOAD_URL}.sha256"
-    echo "获取SHA256校验值: $sha256_url"
-    
-    local expected_sha=""
-    if expected_sha=$(get_sha256_hash "$sha256_url"); then
-        echo "验证文件完整性..."
+
+    local expected_sha
+    local sha_url="${DOWNLOAD_URL}.sha256"
+    if expected_sha="$(get_sha256_hash "$sha_url")" && [ -n "$expected_sha" ]; then
         if ! verify_sha256 "$zip_file" "$expected_sha"; then
-            echo "警告: SHA256校验失败，但继续安装"
-            read -p "是否继续安装? (y/N): " -n 1 -r
-            echo
-            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                echo "安装已取消"
-                exit 1
-            fi
+            prompt_continue_or_abort "SHA256 校验失败"
         fi
     else
-        echo "警告: 无法获取SHA256校验值，跳过校验"
-        read -p "是否继续安装? (y/N): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            echo "安装已取消"
-            exit 1
-        fi
+        prompt_continue_or_abort "无法获取 SHA256 校验信息"
     fi
-    
-    # 安装
-    install_binary "$zip_file" "$INSTALL_DIR"
+
+    install_binary "$zip_file" "$INSTALL_PATH"
 }
 
-# 运行主函数
 main "$@"

@@ -22,9 +22,36 @@ Manage, sync and connect to your servers from the terminal.
 # Homebrew
 brew install vst93/tap/ttm
 
-# Shell script
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh)"
+# Shell script (recommended: review before run)
+curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh
+bash install.sh
+rm -f install.sh
+
+# Show installer options
+bash install.sh --help
+
+# Custom install dir (optional)
+curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh
+INSTALL_DIR="$HOME/.local/bin" bash install.sh
+rm -f install.sh
+
+# 查看安装脚本参数
+bash install.sh --help
 ```
+
+### Termux (Android)
+
+```bash
+pkg update
+pkg install curl unzip
+curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh
+bash install.sh
+rm -f install.sh
+```
+
+- Default install path on Termux: `$PREFIX/bin`
+- If checksum fetch/verify fails in non-interactive mode, installer aborts by default
+- You can force continue only when you trust the source: `FORCE_INSTALL=1 ...`
 
 ## Keybindings
 
@@ -108,8 +135,29 @@ make build    # or: go build -o ttm .
 brew install vst93/tap/ttm
 
 # 脚本安装
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh)"
+curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh
+bash install.sh
+rm -f install.sh
+
+# 可选：自定义安装目录
+curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh
+INSTALL_DIR="$HOME/.local/bin" bash install.sh
+rm -f install.sh
 ```
+
+### Termux（Android）
+
+```bash
+pkg update
+pkg install curl unzip
+curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh
+bash install.sh
+rm -f install.sh
+```
+
+- Termux 默认安装目录为 `$PREFIX/bin`
+- 在非交互环境中，如果校验信息获取失败或 SHA256 不匹配，脚本默认中止
+- 仅在确认来源可信时才强制继续：`FORCE_INSTALL=1 ...`
 
 ## 快捷键
 
