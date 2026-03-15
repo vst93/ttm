@@ -22,34 +22,24 @@ Manage, sync and connect to your servers from the terminal.
 # Homebrew
 brew install vst93/tap/ttm
 
-# Shell script (recommended: review before run)
-curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh
-bash install.sh
-rm -f install.sh
+# Shell script
+curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && bash install.sh
 
 # Show installer options
-bash install.sh --help
+curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && bash install.sh --help
 
 # Custom install dir (optional)
-curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh
-INSTALL_DIR="$HOME/.local/bin" bash install.sh
-rm -f install.sh
-
-# 查看安装脚本参数
-bash install.sh --help
+curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && INSTALL_DIR="$HOME/.local/bin" bash install.sh
 ```
 
 ### Termux (Android)
 
 ```bash
-pkg update
-pkg install curl unzip
-curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh
-bash install.sh
-rm -f install.sh
+pkg update && pkg install curl unzip && curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && bash install.sh
 ```
 
 - Default install path on Termux: `$PREFIX/bin`
+- Downloaded `install.sh` removes itself automatically after execution (set `AUTO_DELETE_INSTALL_SCRIPT=0` to keep it)
 - If checksum fetch/verify fails in non-interactive mode, installer aborts by default
 - You can force continue only when you trust the source: `FORCE_INSTALL=1 ...`
 
@@ -135,27 +125,23 @@ make build    # or: go build -o ttm .
 brew install vst93/tap/ttm
 
 # 脚本安装
-curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh
-bash install.sh
-rm -f install.sh
+curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && bash install.sh
+
+# 查看安装脚本参数
+curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && bash install.sh --help
 
 # 可选：自定义安装目录
-curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh
-INSTALL_DIR="$HOME/.local/bin" bash install.sh
-rm -f install.sh
+curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && INSTALL_DIR="$HOME/.local/bin" bash install.sh
 ```
 
 ### Termux（Android）
 
 ```bash
-pkg update
-pkg install curl unzip
-curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh
-bash install.sh
-rm -f install.sh
+pkg update && pkg install curl unzip && curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && bash install.sh
 ```
 
 - Termux 默认安装目录为 `$PREFIX/bin`
+- 下载的 `install.sh` 在执行后会自动删除（如需保留可设置 `AUTO_DELETE_INSTALL_SCRIPT=0`）
 - 在非交互环境中，如果校验信息获取失败或 SHA256 不匹配，脚本默认中止
 - 仅在确认来源可信时才强制继续：`FORCE_INSTALL=1 ...`
 

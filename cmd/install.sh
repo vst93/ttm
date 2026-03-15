@@ -8,8 +8,10 @@ BINARY_NAME="ttm"
 REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}"
 API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest"
 FORCE_INSTALL="${FORCE_INSTALL:-0}"
+AUTO_DELETE_INSTALL_SCRIPT="${AUTO_DELETE_INSTALL_SCRIPT:-1}"
 
 TEMP_DIR=""
+SCRIPT_PATH="${BASH_SOURCE[0]:-}"
 
 log_info() {
     printf '[INFO] %s\n' "$*"
@@ -27,6 +29,10 @@ cleanup() {
     if [ -n "$TEMP_DIR" ]; then
         rm -rf "$TEMP_DIR"
     fi
+
+    if should_self_delete_script; then
+        rm -f "$SCRIPT_PATH" || true
+    fi
 }
 
 trap cleanup EXIT
@@ -43,6 +49,31 @@ has_cmd() {
     command -v "$1" >/dev/null 2>&1
 }
 
+should_self_delete_script() {
+    local script_name
+
+    if [ "$AUTO_DELETE_INSTALL_SCRIPT" != "1" ]; then
+        return 1
+    fi
+
+    if [ -z "$SCRIPT_PATH" ] || [ ! -f "$SCRIPT_PATH" ]; then
+        return 1
+    fi
+
+    script_name="$(basename "$SCRIPT_PATH")"
+    if [ "$script_name" != "install.sh" ]; then
+        return 1
+    fi
+
+    case "$SCRIPT_PATH" in
+        cmd/install.sh|*/cmd/install.sh)
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
 print_help() {
     cat <<EOF
 Usage: ${BINARY_NAME}-install [OPTIONS]
@@ -55,8 +86,9 @@ Options:
       --force               Continue install when checksum fetch/verify fails
 
 Environment variables:
-  INSTALL_DIR      Same as --install-dir
-  FORCE_INSTALL=1  Same as --force
+  INSTALL_DIR                   Same as --install-dir
+  FORCE_INSTALL=1               Same as --force
+  AUTO_DELETE_INSTALL_SCRIPT=0  Disable auto-deleting downloaded install.sh
 EOF
 }
 
