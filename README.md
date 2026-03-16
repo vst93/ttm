@@ -15,6 +15,8 @@ Manage, sync and connect to your servers — all from the terminal.
 - **Gist sync** — push/pull bookmarks via GitHub or Gitee Gist
 - **In-app config** — set token and gist ID without leaving the TUI
 - **Filter & paginate** — fuzzy search across bookmarks
+- **Private key input modes** — paste key text or provide a key file path (resolved on save)
+- **Clipboard-aware copy** — `Ctrl+Y` supports system clipboard with terminal fallback where applicable
 - **i18n** — English / 中文, toggle with `L`
 - **Update check** — press `u` to check for new releases
 - **Cross-platform** — macOS, Linux, Windows, Android (Termux)
@@ -97,6 +99,30 @@ curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/
 | `?` | Help |
 | `q` | Quit |
 
+### Editor Shortcuts (Bookmark / Config)
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+S` | Save editor form |
+| `Ctrl+R` | Reveal / hide secret fields |
+| `Ctrl+Y` | Copy focused field |
+| `Ctrl+U` | Clear focused field |
+| `Ctrl+V` | Paste from clipboard (Private Key field supports multiline paste) |
+
+### Private Key Path Input
+
+- In bookmark editor, `Private Key` accepts either raw key text or a file path.
+- On save, if the value looks like a path and file reading succeeds, TTM stores the file content.
+- If file reading fails (unreadable/path is directory/too large), TTM keeps the original path text and shows a clear tip.
+- Current size guard for path-loaded key files: up to `256KB`.
+
+### Clipboard Notes (SSH / tmux / terminal)
+
+- In some remote terminal sessions, clipboard behavior depends on terminal support.
+- If terminal clipboard fallback is used, TTM will indicate it in the success tip.
+- If copy cannot reach a usable clipboard backend, TTM returns an explicit failure instead of reporting false success.
+- tmux tip: enable clipboard passthrough (for example `set -g set-clipboard on`) in your tmux config.
+
 ## Gist Sync
 
 Bookmarks can be synced across machines via a private Gist.
@@ -159,6 +185,8 @@ make build
 - **Gist 同步** — 通过 GitHub 或 Gitee Gist 推送 / 拉取书签
 - **应用内配置** — 无需离开 TUI 即可设置 Token 和 Gist ID
 - **搜索与分页** — 模糊过滤书签列表
+- **私钥输入模式** — 支持粘贴私钥文本或填写私钥文件路径（保存时解析）
+- **剪贴板感知复制** — `Ctrl+Y` 优先系统剪贴板，并在可用时回退终端通道
 - **双语** — English / 中文，按 `L` 切换
 - **版本检查** — 按 `u` 检查新版本
 - **跨平台** — macOS、Linux、Windows、Android (Termux)
@@ -240,6 +268,30 @@ curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/
 | `h/l` `←/→` | 翻页 |
 | `?` | 帮助 |
 | `q` | 退出 |
+
+### 编辑器快捷键（书签 / 配置）
+
+| 按键 | 功能 |
+|------|------|
+| `Ctrl+S` | 保存编辑内容 |
+| `Ctrl+R` | 显示 / 隐藏敏感字段 |
+| `Ctrl+Y` | 复制当前字段 |
+| `Ctrl+U` | 清空当前字段 |
+| `Ctrl+V` | 从剪贴板粘贴（Private Key 字段支持多行） |
+
+### Private Key 路径输入
+
+- 在书签编辑器中，`Private Key` 既可填写私钥文本，也可填写文件路径。
+- 保存时，如果输入看起来是路径且读取成功，TTM 会将文件内容写入私钥字段。
+- 如果读取失败（不可读/是目录/文件过大），TTM 会保留原路径文本并给出明确提示。
+- 当前路径读取大小限制：`256KB`。
+
+### 剪贴板说明（SSH / tmux / 终端）
+
+- 在部分远端终端环境中，剪贴板行为受终端能力影响。
+- 当使用终端剪贴板回退通道时，TTM 会在成功提示中明确标注。
+- 若无法写入可用剪贴板通道，TTM 会明确报错，不再出现“提示成功但实际为空白”。
+- tmux 建议：在配置中开启剪贴板透传（例如 `set -g set-clipboard on`）。
 
 ## Gist 同步
 

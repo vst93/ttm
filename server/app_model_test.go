@@ -1123,12 +1123,12 @@ func TestBookmarkEditorShowModeRendersFullPrivateKeyPreview(t *testing.T) {
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
 
 	view := am.View()
-	if !strings.Contains(view, "line-1") || !strings.Contains(view, "line-2") || !strings.Contains(view, "END OPENSSH PRIVATE KEY") {
-		t.Fatalf("expected full multi-line private key preview in view, got %q", view)
+	if !strings.Contains(view, "line-1\\nline-2") || !strings.Contains(view, "END OPENSSH PRIVATE KEY") {
+		t.Fatalf("expected private key preview with escaped newlines in view, got %q", view)
 	}
 }
 
-func TestPrivateKeyPreviewStaysSingleLineAfterEnterInShowMode(t *testing.T) {
+func TestPrivateKeyPreviewKeepsMultilineAfterEnterInShowMode(t *testing.T) {
 	AM = AppModel{}
 	am := &AM
 	_ = setupBookmarkTempDir(t)
@@ -1157,11 +1157,11 @@ func TestPrivateKeyPreviewStaysSingleLineAfterEnterInShowMode(t *testing.T) {
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyEnter})
 
 	view := am.View()
-	if !strings.Contains(view, "line-1 line-2") {
-		t.Fatalf("expected single-line folded preview after enter, got %q", view)
+	if strings.Contains(view, "line-1 line-2") {
+		t.Fatalf("expected multiline private key preview after enter, got folded single-line view: %q", view)
 	}
-	if strings.Contains(view, "line-1\n") {
-		t.Fatalf("expected no multiline private key preview after enter, got %q", view)
+	if !strings.Contains(view, "line-1") || !strings.Contains(view, "line-2") {
+		t.Fatalf("expected multiline private key preview after enter, got %q", view)
 	}
 }
 
@@ -1241,8 +1241,1038 @@ func TestBookmarkEditorCtrlYCopiesPrivateKeyAfterEnter(t *testing.T) {
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
 
-	if strings.TrimSpace(copied) == "" {
-		t.Fatalf("expected ctrl+y copy not empty after enter on private key")
+	if copied != originalKey+"\n" {
+		t.Fatalf("expected ctrl+y copy appends newline after enter in private key field, got %q", copied)
+	}
+}
+
+func TestBookmarkEditorCtrlVPastesPrivateKeyWithNewlines(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	originalRead := clipboardReadAll
+	defer func() { clipboardReadAll = originalRead }()
+	clipboardReadAll = func() (string, error) {
+		return "-----BEGIN OPENSSH PRIVATE KEY-----\nline-1\nline-2\n-----END OPENSSH PRIVATE KEY-----", nil
+	}
+
+	originalWrite := clipboardWriteAll
+	defer func() { clipboardWriteAll = originalWrite }()
+	copied := ""
+	clipboardWriteAll = func(text string) error {
+		copied = text
+		return nil
+	}
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+
+	expected := "-----BEGIN OPENSSH PRIVATE KEY-----\nline-1\nline-2\n-----END OPENSSH PRIVATE KEY-----"
+	if copied != expected {
+		t.Fatalf("expected ctrl+v paste to preserve newlines for private key, got %q", copied)
+	}
+}
+
+func TestBookmarkEditorPasteMultilinePrivateKeyKeepsNewlines(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	originalWrite := clipboardWriteAll
+	defer func() { clipboardWriteAll = originalWrite }()
+	copied := ""
+	clipboardWriteAll = func(text string) error {
+		copied = text
+		return nil
+	}
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+
+	pasted := "-----BEGIN OPENSSH PRIVATE KEY-----\nline-1\nline-2\n-----END OPENSSH PRIVATE KEY-----"
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(pasted)})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+
+	if copied != pasted {
+		t.Fatalf("expected pasted multiline private key to preserve newlines, got %q", copied)
+	}
+}
+
+func TestBookmarkEditorPasteSequenceKeepsNewlinesInPrivateKey(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	originalWrite := clipboardWriteAll
+	defer func() { clipboardWriteAll = originalWrite }()
+	copied := ""
+	clipboardWriteAll = func(text string) error {
+		copied = text
+		return nil
+	}
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("line-1"), Paste: true})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyEnter, Paste: true})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("line-2"), Paste: true})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+
+	if copied != "line-1\nline-2" {
+		t.Fatalf("expected pasted key sequence to preserve newline in private key, got %q", copied)
+	}
+}
+
+func TestBookmarkEditorCollapsedPEMInputKeepsSpaces(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	originalWrite := clipboardWriteAll
+	defer func() { clipboardWriteAll = originalWrite }()
+	copied := ""
+	clipboardWriteAll = func(text string) error {
+		copied = text
+		return nil
+	}
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+
+	collapsed := "-----BEGIN OPENSSH PRIVATE KEY----- AAAAB3NzaC1yc2EAAAADAQABAAABAQC11111111111111111111 BBBB3NzaC1yc2EAAAADAQABAAABAQC22222222222222222222 -----END OPENSSH PRIVATE KEY-----"
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(collapsed)})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+
+	if copied != collapsed {
+		t.Fatalf("expected collapsed pem input to keep spaces unchanged, got %q", copied)
+	}
+}
+
+func TestBookmarkEditorNewlineRuneSequenceKeepsNewlines(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	originalWrite := clipboardWriteAll
+	defer func() { clipboardWriteAll = originalWrite }()
+	copied := ""
+	clipboardWriteAll = func(text string) error {
+		copied = text
+		return nil
+	}
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("line-1")})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\n'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("line-2")})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+
+	if copied != "line-1\nline-2" {
+		t.Fatalf("expected newline-rune sequence to preserve newline, got %q", copied)
+	}
+}
+
+func TestBookmarkEditorEnterSequenceKeepsNewlines(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	originalWrite := clipboardWriteAll
+	defer func() { clipboardWriteAll = originalWrite }()
+	copied := ""
+	clipboardWriteAll = func(text string) error {
+		copied = text
+		return nil
+	}
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("line-1")})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("line-2")})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+
+	if copied != "line-1\nline-2" {
+		t.Fatalf("expected enter sequence to preserve newline, got %q", copied)
+	}
+}
+
+func TestBookmarkEditorPrivateKeyFocusedShowsEscapedNewlineAndCursor(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "line-1\nline-2",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+
+	view := am.View()
+	if !strings.Contains(view, "line-1\\nline-2") {
+		t.Fatalf("expected focused private key to display escaped newline form, got %q", view)
+	}
+}
+
+func TestBookmarkEditorPrivateKeyFieldShowsPathHint(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	view := am.View()
+	if !strings.Contains(view, "file path") {
+		t.Fatalf("expected private key field hint to mention file path, got %q", view)
+	}
+}
+
+func TestBookmarkEditorPrivateKeyBackspaceRespectsCursorPosition(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	originalWrite := clipboardWriteAll
+	defer func() { clipboardWriteAll = originalWrite }()
+	copied := ""
+	clipboardWriteAll = func(text string) error {
+		copied = text
+		return nil
+	}
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "abcdef",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+
+	AM.editor.inputs[editorFieldPrivateKey].SetCursor(3)
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+
+	if copied != "abdef" {
+		t.Fatalf("expected backspace to delete relative to cursor, got %q", copied)
+	}
+}
+
+func TestBookmarkEditorSaveSyncsPrivateKeyFromInput(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "old-key",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+
+	AM.editor.inputs[editorFieldPrivateKey].SetValue("-----BEGIN OPENSSH PRIVATE KEY-----\\nNEWLINE-1\\nNEWLINE-2\\n-----END OPENSSH PRIVATE KEY-----")
+	AM.editor.secretValues[editorFieldPrivateKey] = "old-key"
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+
+	expected := "-----BEGIN OPENSSH PRIVATE KEY-----\nNEWLINE-1\nNEWLINE-2\n-----END OPENSSH PRIVATE KEY-----"
+	if got := AM.BookmarkInfo.List[0].PrivateKey; got != expected {
+		t.Fatalf("expected save to sync private key from input, got %q", got)
+	}
+}
+
+func TestBookmarkEditorSavePrefersMultilineSecretOverSpaceFlattenedInput(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+
+	multiline := "-----BEGIN OPENSSH PRIVATE KEY-----\nline-1\nline-2\n-----END OPENSSH PRIVATE KEY-----"
+	AM.editor.secretValues[editorFieldPrivateKey] = multiline
+	AM.editor.inputs[editorFieldPrivateKey].SetValue("-----BEGIN OPENSSH PRIVATE KEY----- line-1 line-2 -----END OPENSSH PRIVATE KEY-----")
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+
+	if got := AM.BookmarkInfo.List[0].PrivateKey; got != multiline {
+		t.Fatalf("expected save to preserve multiline private key instead of flattened spaces, got %q", got)
+	}
+}
+
+func TestBookmarkEditorSaveLoadsPrivateKeyFromFilePath(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	dir := setupBookmarkTempDir(t)
+
+	keyPath := filepath.Join(dir, "id_test_key")
+	keyContent := "-----BEGIN OPENSSH PRIVATE KEY-----\r\nline-1\r\nline-2\r\n-----END OPENSSH PRIVATE KEY-----\r\n"
+	if err := os.WriteFile(keyPath, []byte(keyContent), 0600); err != nil {
+		t.Fatalf("failed writing test key file: %v", err)
+	}
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "old",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	AM.editor.inputs[editorFieldPrivateKey].SetValue(keyPath)
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+
+	expected := "-----BEGIN OPENSSH PRIVATE KEY-----\nline-1\nline-2\n-----END OPENSSH PRIVATE KEY-----\n"
+	if got := AM.BookmarkInfo.List[0].PrivateKey; got != expected {
+		t.Fatalf("expected private key loaded from file, got %q", got)
+	}
+	if !strings.Contains(AM.TipString, "loaded from file path") {
+		t.Fatalf("expected tip to mention file-path load, got %q", AM.TipString)
+	}
+}
+
+func TestBookmarkEditorSaveUnreadablePrivateKeyPathKeepsText(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	dir := setupBookmarkTempDir(t)
+
+	missingPath := filepath.Join(dir, "no_such_private_key_file")
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "old",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	AM.editor.inputs[editorFieldPrivateKey].SetValue(missingPath)
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+
+	if got := AM.BookmarkInfo.List[0].PrivateKey; got != missingPath {
+		t.Fatalf("expected unreadable path text kept as private key, got %q", got)
+	}
+	if !strings.Contains(AM.TipString, "path unreadable") {
+		t.Fatalf("expected tip to mention unreadable path, got %q", AM.TipString)
+	}
+}
+
+func TestBookmarkEditorSaveTooLargePrivateKeyFileKeepsPathText(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	dir := setupBookmarkTempDir(t)
+
+	keyPath := filepath.Join(dir, "id_large_key")
+	large := strings.Repeat("A", int(maxPrivateKeyFileBytes)+1)
+	if err := os.WriteFile(keyPath, []byte(large), 0600); err != nil {
+		t.Fatalf("failed writing large test key file: %v", err)
+	}
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "old",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	AM.editor.inputs[editorFieldPrivateKey].SetValue(keyPath)
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+
+	if got := AM.BookmarkInfo.List[0].PrivateKey; got != keyPath {
+		t.Fatalf("expected oversize file path text kept as private key, got %q", got)
+	}
+	if !strings.Contains(AM.TipString, "file is too large") {
+		t.Fatalf("expected tip to mention oversize file, got %q", AM.TipString)
+	}
+}
+
+func TestBookmarkEditorPasteThenSaveKeepsPrivateKeyNewlines(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+
+	pasted := "-----BEGIN OPENSSH PRIVATE KEY-----\nline-1\nline-2\n-----END OPENSSH PRIVATE KEY-----"
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(pasted)})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+
+	if got := AM.BookmarkInfo.List[0].PrivateKey; got != pasted {
+		t.Fatalf("expected pasted private key newlines kept after direct save, got %q", got)
+	}
+}
+
+func TestBookmarkEditorPasteSequenceThenSaveKeepsPrivateKeyNewlines(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("-----BEGIN OPENSSH PRIVATE KEY-----"), Paste: true})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyEnter, Paste: true})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("line-1"), Paste: true})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyEnter, Paste: true})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("line-2"), Paste: true})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyEnter, Paste: true})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("-----END OPENSSH PRIVATE KEY-----"), Paste: true})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+
+	expected := "-----BEGIN OPENSSH PRIVATE KEY-----\nline-1\nline-2\n-----END OPENSSH PRIVATE KEY-----"
+	if got := AM.BookmarkInfo.List[0].PrivateKey; got != expected {
+		t.Fatalf("expected pasted sequence private key newlines kept after direct save, got %q", got)
+	}
+}
+
+func TestBookmarkEditorPasteMultipleNewlinesKeepsExactTextOnCopyAndSave(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	originalWrite := clipboardWriteAll
+	defer func() { clipboardWriteAll = originalWrite }()
+	copied := ""
+	clipboardWriteAll = func(text string) error {
+		copied = text
+		return nil
+	}
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+
+	pasted := "-----BEGIN OPENSSH PRIVATE KEY-----\nline-1\n\nline-2\n\n\nline-3\n-----END OPENSSH PRIVATE KEY-----\n"
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(pasted)})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+
+	if copied != pasted {
+		t.Fatalf("expected ctrl+y to keep exact multiple-newline private key, got %q", copied)
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	if got := AM.BookmarkInfo.List[0].PrivateKey; got != pasted {
+		t.Fatalf("expected save to keep exact multiple-newline private key, got %q", got)
+	}
+}
+
+func TestBookmarkEditorSaveNormalizesEscapedPrivateKeyNewlines(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+
+	AM.editor.secretValues[editorFieldPrivateKey] = "-----BEGIN OPENSSH PRIVATE KEY-----\\nline-1\\nline-2\\n-----END OPENSSH PRIVATE KEY-----"
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+
+	expected := "-----BEGIN OPENSSH PRIVATE KEY-----\nline-1\nline-2\n-----END OPENSSH PRIVATE KEY-----"
+	if got := AM.BookmarkInfo.List[0].PrivateKey; got != expected {
+		t.Fatalf("expected save to normalize escaped private key newlines, got %q", got)
+	}
+}
+
+func TestBookmarkEditorCollapsedPEMKeepsSpaces(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+
+	collapsed := "-----BEGIN OPENSSH PRIVATE KEY----- AAAAB3NzaC1yc2EAAAADAQABAAABAQC11111111111111111111  BBBB3NzaC1yc2EAAAADAQABAAABAQC22222222222222222222   CCCC3NzaC1yc2EAAAADAQABAAABAQC33333333333333333333 -----END OPENSSH PRIVATE KEY-----"
+	AM.editor.inputs[editorFieldPrivateKey].SetValue(collapsed)
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+
+	expected := collapsed
+	if got := AM.BookmarkInfo.List[0].PrivateKey; got != expected {
+		t.Fatalf("expected collapsed pem to keep spaces unchanged, got %q", got)
+	}
+}
+
+func TestBookmarkEditorCollapsedTextWithSpacesKeepsSpaces(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+
+	plainText := "word1 word2  word3"
+	AM.editor.inputs[editorFieldPrivateKey].SetValue(plainText)
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+
+	if got := AM.BookmarkInfo.List[0].PrivateKey; got != plainText {
+		t.Fatalf("expected spaces to remain unchanged, got %q", got)
+	}
+}
+
+func TestBookmarkEditorCollapsedPEMWithShortChunksKeepsSpaces(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+
+	collapsed := "-----BEGIN OPENSSH PRIVATE KEY----- AAAA BBBB CCCC DDDD EEEE FFFF GGGG HHHH IIII JJJJ KKKK LLLL MMMM NNNN OOOO PPPP QQQQ RRRR SSSS TTTT -----END OPENSSH PRIVATE KEY-----"
+	AM.editor.inputs[editorFieldPrivateKey].SetValue(collapsed)
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+
+	expected := collapsed
+	if got := AM.BookmarkInfo.List[0].PrivateKey; got != expected {
+		t.Fatalf("expected collapsed pem with short chunks to keep spaces unchanged, got %q", got)
+	}
+}
+
+func TestBookmarkEditorCtrlUClearsFocusedField(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "line-1\nline-2",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+
+	if got := AM.editor.fieldValueForCopy(editorFieldPrivateKey); got != "" {
+		t.Fatalf("expected ctrl+u to clear focused private key field, got %q", got)
+	}
+}
+
+func TestBookmarkEditorCtrlUStringPathClearsFocusedField(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "line-1\nline-2",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{0x15}})
+
+	if got := AM.editor.fieldValueForCopy(editorFieldPrivateKey); got != "" {
+		t.Fatalf("expected ctrl+u rune path to clear focused private key field, got %q", got)
+	}
+}
+
+func TestConfigEditorCtrlUClearsFocusedField(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	am.GistConfig = GistConfig{Platform: "github", Token: "ghp_plain_token", GistID: "gid-1", Locale: "en"}
+	AM.Platform = "github"
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+
+	if got := AM.configEditor.fieldValueForCopy(configFieldToken); got != "" {
+		t.Fatalf("expected ctrl+u to clear focused token field, got %q", got)
+	}
+}
+
+func TestConfigEditorCtrlUStringPathClearsFocusedField(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	am.GistConfig = GistConfig{Platform: "github", Token: "ghp_plain_token", GistID: "gid-1", Locale: "en"}
+	AM.Platform = "github"
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{0x15}})
+
+	if got := AM.configEditor.fieldValueForCopy(configFieldToken); got != "" {
+		t.Fatalf("expected ctrl+u rune path to clear focused token field, got %q", got)
+	}
+}
+
+func TestBookmarkEditorCtrlURawRuneClearsFocusedField(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "line-1\nline-2",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	_, _ = am.Update(tea.KeyMsg{Runes: []rune{0x15}})
+
+	if got := AM.editor.fieldValueForCopy(editorFieldPrivateKey); got != "" {
+		t.Fatalf("expected raw ctrl+u rune path to clear focused private key field, got %q", got)
+	}
+}
+
+func TestConfigEditorCtrlURawRuneClearsFocusedField(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	am.GistConfig = GistConfig{Platform: "github", Token: "ghp_plain_token", GistID: "gid-1", Locale: "en"}
+	AM.Platform = "github"
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	_, _ = am.Update(tea.KeyMsg{Runes: []rune{0x15}})
+
+	if got := AM.configEditor.fieldValueForCopy(configFieldToken); got != "" {
+		t.Fatalf("expected raw ctrl+u rune path to clear focused token field, got %q", got)
+	}
+}
+
+func TestBookmarkEditorCtrlUHiddenModeDoesNotRestoreSecret(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "line-1\nline-2",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{0x15}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+
+	if !AM.editor.showSecrets {
+		t.Fatalf("expected typing after ctrl+u to auto reveal empty private key field")
+	}
+	if got := AM.editor.inputs[editorFieldPrivateKey].Value(); got != "A" {
+		t.Fatalf("expected cleared private key field not to restore old value, got %q", got)
+	}
+}
+
+func TestConfigEditorCtrlUHiddenModeDoesNotRestoreToken(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	am.GistConfig = GistConfig{Platform: "github", Token: "ghp_plain_token", GistID: "gid-1", Locale: "en"}
+	AM.Platform = "github"
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{0x15}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+
+	if !AM.configEditor.showSecrets {
+		t.Fatalf("expected typing after ctrl+u to auto reveal empty token field")
+	}
+	if got := AM.configEditor.inputs[configFieldToken].Value(); got != "a" {
+		t.Fatalf("expected cleared token field not to restore old value, got %q", got)
+	}
+}
+
+func TestBookmarkEditorCtrlUHiddenThenRevealStaysEmpty(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "prod",
+		Host:       "10.0.0.8",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		AuthType:   "private-key",
+		PrivateKey: "line-1\nline-2",
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{0x15}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+
+	if got := AM.editor.inputs[editorFieldPrivateKey].Value(); got != "" {
+		t.Fatalf("expected private key to stay empty after hidden ctrl+u then reveal, got %q", got)
+	}
+}
+
+func TestConfigEditorCtrlUHiddenThenRevealStaysEmpty(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	am.GistConfig = GistConfig{Platform: "github", Token: "ghp_plain_token", GistID: "gid-1", Locale: "en"}
+	AM.Platform = "github"
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{0x15}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+
+	if got := AM.configEditor.inputs[configFieldToken].Value(); got != "" {
+		t.Fatalf("expected token to stay empty after hidden ctrl+u then reveal, got %q", got)
 	}
 }
 
@@ -1316,6 +2346,9 @@ func TestEditorHelpShowsCaretRShortcut(t *testing.T) {
 	if !strings.Contains(configView, "^Y") {
 		t.Fatalf("expected config editor help to show ^Y")
 	}
+	if !strings.Contains(configView, "^U") {
+		t.Fatalf("expected config editor help to show ^U")
+	}
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
@@ -1325,6 +2358,9 @@ func TestEditorHelpShowsCaretRShortcut(t *testing.T) {
 	}
 	if !strings.Contains(bookmarkView, "^Y") {
 		t.Fatalf("expected bookmark editor help to show ^Y")
+	}
+	if !strings.Contains(bookmarkView, "^U") {
+		t.Fatalf("expected bookmark editor help to show ^U")
 	}
 }
 

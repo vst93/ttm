@@ -24,6 +24,7 @@ type configEditor struct {
 	scrollToFocus bool
 	showSecrets   bool
 	tokenValue    string
+	tokenCleared  bool
 	inputs        []textinput.Model
 	original      GistConfig
 	viewport      viewport.Model
@@ -68,6 +69,9 @@ func (ce *configEditor) toggleSecretVisibility() {
 
 func (ce *configEditor) fieldValueForCopy(field configField) string {
 	if field == configFieldToken {
+		if ce.tokenCleared {
+			return ""
+		}
 		if strings.TrimSpace(ce.tokenValue) != "" {
 			return ce.tokenValue
 		}
@@ -189,6 +193,21 @@ func (am *AppModel) handleConfigEditorKey(msg tea.KeyMsg) tea.Cmd {
 	if AM.configEditor == nil {
 		return nil
 	}
+	if isClearFieldKey(msg) {
+		focused := AM.configEditor.focusedField()
+		if focused == configFieldPlatform {
+			return nil
+		}
+		idx := int(focused)
+		AM.configEditor.inputs[idx].SetValue("")
+		AM.configEditor.inputs[idx].CursorStart()
+		if focused == configFieldToken {
+			AM.configEditor.tokenValue = ""
+			AM.configEditor.tokenCleared = true
+			AM.configEditor.original.Token = ""
+		}
+		return setTip(am.t("field cleared", "字段已清空"), tipInfo)
+	}
 	switch msg.String() {
 	case "esc":
 		AM.Platform = AM.configEditor.original.Platform
@@ -217,8 +236,12 @@ func (am *AppModel) handleConfigEditorKey(msg tea.KeyMsg) tea.Cmd {
 		if strings.TrimSpace(value) == "" {
 			return setTip(am.t("nothing to copy", "没有可复制内容"), tipInfo)
 		}
-		if err := clipboardWriteAll(value); err != nil {
+		usedOSC52Only, err := writeTextToClipboard(value)
+		if err != nil {
 			return setTip(am.t("copy failed: ", "复制失败: ")+err.Error(), tipError)
+		}
+		if usedOSC52Only {
+			return setTip(fmt.Sprintf(am.t("copied %d chars (terminal clipboard)", "已复制 %d 个字符（终端剪贴板）"), len([]rune(value))), tipSuccess)
 		}
 		return setTip(fmt.Sprintf(am.t("copied %d chars", "已复制 %d 个字符"), len([]rune(value))), tipSuccess)
 	case "ctrl+s":
@@ -244,6 +267,7 @@ func (am *AppModel) handleConfigEditorKey(msg tea.KeyMsg) tea.Cmd {
 		value := AM.configEditor.inputs[idx].Value()
 		if strings.TrimSpace(value) != maskedSecretValue || strings.TrimSpace(AM.configEditor.tokenValue) == "" {
 			AM.configEditor.tokenValue = value
+			AM.configEditor.tokenCleared = strings.TrimSpace(value) == ""
 		}
 	}
 	return cmd
@@ -347,8 +371,8 @@ func (am *AppModel) buildConfigEditorOverlay(frameWidth, frameHeight int) string
 	bodyText := body.String()
 
 	title := am.t("Sync Config", "同步配置")
-	help := fmt.Sprintf(am.t("tab switch · ^S save · ^R reveal/hide %s · ^Y copy all · esc",
-		"tab 切换 · ^S 保存 · ^R 显示/隐藏 %s · ^Y 全部复制 · esc"), AM.configEditor.modeHint(am))
+	help := fmt.Sprintf(am.t("tab switch · ^S save · ^R reveal/hide %s · ^Y copy all · ^U clear field · esc",
+		"tab 切换 · ^S 保存 · ^R 显示/隐藏 %s · ^Y 全部复制 · ^U 清空字段 · esc"), AM.configEditor.modeHint(am))
 	sepWidth := inputWidth + 2
 	if sepWidth > overlayWidth-2 {
 		sepWidth = overlayWidth - 2

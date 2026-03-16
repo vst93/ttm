@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -12,6 +13,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+const maxPrivateKeyFileBytes int64 = 256 * 1024
 
 type bookmarkEditorMode int
 
@@ -51,11 +54,140 @@ type bookmarkEditor struct {
 	authDirty     bool
 	showSecrets   bool
 	secretValues  map[editorField]string
+	secretCleared map[editorField]bool
 	scroll        int
 	scrollToFocus bool
 	inputs        []textinput.Model
 	original      BookmarkItem
 	viewport      viewport.Model
+}
+
+func isNewlineKey(msg tea.KeyMsg) bool {
+	if msg.Type == tea.KeyRunes {
+		if len(msg.Runes) == 1 && (msg.Runes[0] == '\n' || msg.Runes[0] == '\r') {
+			return true
+		}
+	}
+	if msg.Type == tea.KeyEnter || msg.Type == tea.KeyCtrlM || msg.Type == tea.KeyCtrlJ {
+		return true
+	}
+	key := msg.String()
+	return key == "enter" || key == "ctrl+m" || key == "ctrl+j"
+}
+
+func restorePrivateKeyNewlinesIfCollapsed(value string) string {
+	normalized := strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", "\n"), "\r", "\n")
+	normalized = strings.ReplaceAll(normalized, "\\r\\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\\r", "\n")
+	return normalized
+}
+
+func encodePrivateKeyForDisplay(value string) string {
+	normalized := strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", "\n"), "\r", "\n")
+	return strings.ReplaceAll(normalized, "\n", "\\n")
+}
+
+func decodePrivateKeyFromDisplay(value string) string {
+	normalized := strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", "\n"), "\r", "\n")
+	normalized = strings.ReplaceAll(normalized, "\\r\\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\\r", "\n")
+	return normalized
+}
+
+func isLikelyPathText(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || strings.Contains(trimmed, "\n") || strings.Contains(trimmed, "\r") {
+		return false
+	}
+	if filepath.IsAbs(trimmed) || strings.HasPrefix(trimmed, "./") || strings.HasPrefix(trimmed, "../") || strings.HasPrefix(trimmed, ".\\") || strings.HasPrefix(trimmed, "..\\") || strings.HasPrefix(trimmed, "~/") || strings.HasPrefix(trimmed, "~\\") {
+		return true
+	}
+	if len(trimmed) >= 3 {
+		c0 := trimmed[0]
+		if ((c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z')) && trimmed[1] == ':' && (trimmed[2] == '\\' || trimmed[2] == '/') {
+			return true
+		}
+	}
+	return strings.ContainsAny(trimmed, `/\\`)
+}
+
+func expandHomePath(pathText string) string {
+	if pathText == "~" {
+		home, err := os.UserHomeDir()
+		if err == nil && home != "" {
+			return home
+		}
+		return pathText
+	}
+	if strings.HasPrefix(pathText, "~/") || strings.HasPrefix(pathText, "~\\") {
+		home, err := os.UserHomeDir()
+		if err == nil && home != "" {
+			return filepath.Join(home, pathText[2:])
+		}
+	}
+	return pathText
+}
+
+func resolvePrivateKeyMaybePath(input string) (string, string) {
+	normalizedInput := restorePrivateKeyNewlinesIfCollapsed(decodePrivateKeyFromDisplay(input))
+	if !isLikelyPathText(normalizedInput) {
+		return normalizedInput, ""
+	}
+	pathText := expandHomePath(strings.TrimSpace(normalizedInput))
+	info, err := os.Stat(pathText)
+	if err != nil {
+		return normalizedInput, "path_unreadable"
+	}
+	if info.IsDir() {
+		return normalizedInput, "path_unreadable"
+	}
+	if info.Size() > maxPrivateKeyFileBytes {
+		return normalizedInput, "path_too_large"
+	}
+	content, err := os.ReadFile(pathText)
+	if err != nil {
+		return normalizedInput, "path_unreadable"
+	}
+	resolved := strings.ReplaceAll(strings.ReplaceAll(string(content), "\r\n", "\n"), "\r", "\n")
+	return resolved, "path_loaded"
+}
+
+func isClearFieldKey(msg tea.KeyMsg) bool {
+	if msg.Type == tea.KeyCtrlU || msg.String() == "ctrl+u" || msg.Type == tea.KeyCtrlK || msg.String() == "ctrl+k" {
+		return true
+	}
+	if len(msg.Runes) == 1 {
+		return msg.Runes[0] == 0x15 || msg.Runes[0] == 0x0b
+	}
+	return false
+}
+
+func syncPrivateKeyInputSingleLine() {
+	value := AM.editor.secretValues[editorFieldPrivateKey]
+	display := encodePrivateKeyForDisplay(value)
+	AM.editor.inputs[int(editorFieldPrivateKey)].SetValue(display)
+	AM.editor.inputs[int(editorFieldPrivateKey)].SetCursor(len([]rune(display)))
+}
+
+func insertIntoPrivateKeyInput(displayText string) {
+	input := &AM.editor.inputs[int(editorFieldPrivateKey)]
+	current := []rune(input.Value())
+	insert := []rune(displayText)
+	pos := input.Position()
+	if pos < 0 {
+		pos = 0
+	}
+	if pos > len(current) {
+		pos = len(current)
+	}
+	updated := string(current[:pos]) + string(insert) + string(current[pos:])
+	input.SetValue(updated)
+	input.SetCursor(pos + len(insert))
+	decoded := restorePrivateKeyNewlinesIfCollapsed(decodePrivateKeyFromDisplay(updated))
+	AM.editor.secretValues[editorFieldPrivateKey] = decoded
+	AM.editor.secretCleared[editorFieldPrivateKey] = strings.TrimSpace(decoded) == ""
 }
 
 type deleteConfirmState struct {
@@ -127,6 +259,11 @@ func newBookmarkEditor(mode bookmarkEditorMode, index int, existing BookmarkItem
 			editorFieldPrivateKey: existing.PrivateKey,
 			editorFieldPassphrase: existing.Passphrase,
 		},
+		secretCleared: map[editorField]bool{
+			editorFieldPassword:   false,
+			editorFieldPrivateKey: false,
+			editorFieldPassphrase: false,
+		},
 		original: existing,
 		inputs: []textinput.Model{
 			buildEditorInput(existing.Title, "server-prod"),
@@ -135,7 +272,7 @@ func newBookmarkEditor(mode bookmarkEditorMode, index int, existing BookmarkItem
 			buildEditorInput(port, "22"),
 			buildEditorInput("", "auth type"),
 			buildEditorInput(password, "password"),
-			buildEditorInput(privateKey, "private key"),
+			buildEditorInput(privateKey, "private key or file path"),
 			buildEditorInput(passphrase, "passphrase"),
 		},
 	}
@@ -153,6 +290,12 @@ func (be *bookmarkEditor) applySecretVisibility() {
 	secretFields := []editorField{editorFieldPassword, editorFieldPrivateKey, editorFieldPassphrase}
 	if be.showSecrets {
 		for _, field := range secretFields {
+			if field == editorFieldPrivateKey {
+				display := encodePrivateKeyForDisplay(be.secretValues[field])
+				be.inputs[int(field)].SetValue(display)
+				be.inputs[int(field)].SetCursor(len([]rune(display)))
+				continue
+			}
 			be.inputs[int(field)].SetValue(be.secretValues[field])
 			be.inputs[int(field)].CursorStart()
 		}
@@ -183,6 +326,11 @@ func (be *bookmarkEditor) captureSecretInput(field editorField) {
 	if strings.TrimSpace(value) == maskedSecretValue && strings.TrimSpace(be.secretValues[field]) != "" {
 		return
 	}
+	if field == editorFieldPrivateKey {
+		value = decodePrivateKeyFromDisplay(value)
+		value = restorePrivateKeyNewlinesIfCollapsed(value)
+	}
+	be.secretCleared[field] = strings.TrimSpace(value) == ""
 	if field == editorFieldPrivateKey && strings.Contains(previous, "\n") {
 		normalizedPrevious := strings.Join(strings.Fields(strings.ReplaceAll(strings.ReplaceAll(previous, "\r\n", "\n"), "\n", " ")), " ")
 		normalizedValue := strings.Join(strings.Fields(value), " ")
@@ -195,6 +343,9 @@ func (be *bookmarkEditor) captureSecretInput(field editorField) {
 
 func (be *bookmarkEditor) fieldValueForCopy(field editorField) string {
 	if isSecretEditorField(field) {
+		if be.secretCleared[field] {
+			return ""
+		}
 		if strings.TrimSpace(be.secretValues[field]) != "" {
 			return be.secretValues[field]
 		}
@@ -455,6 +606,34 @@ func (am *AppModel) handleEditorKey(msg tea.KeyMsg) tea.Cmd {
 	if AM.editor == nil {
 		return nil
 	}
+	if isClearFieldKey(msg) {
+		field := AM.editor.focusedField()
+		if field == editorFieldAuthType {
+			return nil
+		}
+		if isSecretEditorField(field) {
+			AM.editor.secretValues[field] = ""
+			AM.editor.secretCleared[field] = true
+			switch field {
+			case editorFieldPassword:
+				AM.editor.original.Password = ""
+			case editorFieldPrivateKey:
+				AM.editor.original.PrivateKey = ""
+			case editorFieldPassphrase:
+				AM.editor.original.Passphrase = ""
+			}
+			if AM.editor.showSecrets {
+				AM.editor.inputs[int(field)].SetValue("")
+				AM.editor.inputs[int(field)].CursorStart()
+			} else {
+				AM.editor.applySecretVisibility()
+			}
+			return setTip(am.t("field cleared", "字段已清空"), tipInfo)
+		}
+		AM.editor.inputs[int(field)].SetValue("")
+		AM.editor.inputs[int(field)].CursorStart()
+		return setTip(am.t("field cleared", "字段已清空"), tipInfo)
+	}
 	switch msg.String() {
 	case "esc":
 		AM.editor = nil
@@ -475,10 +654,35 @@ func (am *AppModel) handleEditorKey(msg tea.KeyMsg) tea.Cmd {
 		if strings.TrimSpace(value) == "" {
 			return setTip(am.t("nothing to copy", "没有可复制内容"), tipInfo)
 		}
-		if err := clipboardWriteAll(value); err != nil {
+		usedOSC52Only, err := writeTextToClipboard(value)
+		if err != nil {
 			return setTip(am.t("copy failed: ", "复制失败: ")+err.Error(), tipError)
 		}
+		if usedOSC52Only {
+			return setTip(fmt.Sprintf(am.t("copied %d chars (terminal clipboard)", "已复制 %d 个字符（终端剪贴板）"), len([]rune(value))), tipSuccess)
+		}
 		return setTip(fmt.Sprintf(am.t("copied %d chars", "已复制 %d 个字符"), len([]rune(value))), tipSuccess)
+	case "ctrl+v":
+		if AM.editor.focusedField() == editorFieldPrivateKey {
+			if !AM.editor.showSecrets {
+				if strings.TrimSpace(AM.editor.fieldValueForCopy(editorFieldPrivateKey)) == "" {
+					AM.editor.showSecrets = true
+					AM.editor.applySecretVisibility()
+				} else {
+					return setTip(am.t("press ^R to reveal secret before editing", "编辑前请按 ^R 显示密钥"), tipInfo)
+				}
+			}
+			text, err := clipboardReadAll()
+			if err != nil {
+				return setTip(am.t("paste failed: ", "粘贴失败: ")+err.Error(), tipError)
+			}
+			if text == "" {
+				return nil
+			}
+			normalized := strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
+			insertIntoPrivateKeyInput(encodePrivateKeyForDisplay(normalized))
+			return nil
+		}
 	case "left", "right":
 		if AM.editor.focusedField() == editorFieldAuthType {
 			AM.editor.cycleAuthType()
@@ -521,6 +725,20 @@ func (am *AppModel) handleEditorKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	}
 	focus := int(focusField)
+	if focusField == editorFieldPrivateKey && AM.editor.showSecrets {
+		if isNewlineKey(msg) {
+			insertIntoPrivateKeyInput("\\n")
+			return nil
+		}
+		if msg.Type == tea.KeyRunes {
+			runesText := string(msg.Runes)
+			if strings.Contains(runesText, "\n") || strings.Contains(runesText, "\r") {
+				normalized := strings.ReplaceAll(strings.ReplaceAll(runesText, "\r\n", "\n"), "\r", "\n")
+				insertIntoPrivateKeyInput(encodePrivateKeyForDisplay(normalized))
+				return nil
+			}
+		}
+	}
 	updated, cmd := AM.editor.inputs[focus].Update(msg)
 	AM.editor.inputs[focus] = updated
 	AM.editor.captureSecretInput(focusField)
@@ -531,6 +749,27 @@ func (am *AppModel) saveEditor() tea.Cmd {
 	if AM.editor == nil {
 		return nil
 	}
+	privateKeyPathStatus := ""
+
+	if AM.editor.showSecrets {
+		AM.editor.secretValues[editorFieldPassword] = AM.editor.inputs[editorFieldPassword].Value()
+		privateKeyInput := AM.editor.inputs[editorFieldPrivateKey].Value()
+		decodedPrivateKey := restorePrivateKeyNewlinesIfCollapsed(decodePrivateKeyFromDisplay(privateKeyInput))
+		currentPrivateKey := AM.editor.secretValues[editorFieldPrivateKey]
+		if strings.Contains(currentPrivateKey, "\n") {
+			normalizedCurrent := strings.Join(strings.Fields(strings.ReplaceAll(strings.ReplaceAll(currentPrivateKey, "\r\n", "\n"), "\n", " ")), " ")
+			normalizedDecoded := strings.Join(strings.Fields(decodedPrivateKey), " ")
+			if normalizedCurrent == normalizedDecoded {
+				decodedPrivateKey = currentPrivateKey
+			}
+		}
+		AM.editor.secretValues[editorFieldPrivateKey] = decodedPrivateKey
+		AM.editor.secretValues[editorFieldPassphrase] = AM.editor.inputs[editorFieldPassphrase].Value()
+		AM.editor.secretCleared[editorFieldPassword] = strings.TrimSpace(AM.editor.secretValues[editorFieldPassword]) == ""
+		AM.editor.secretCleared[editorFieldPrivateKey] = strings.TrimSpace(AM.editor.secretValues[editorFieldPrivateKey]) == ""
+		AM.editor.secretCleared[editorFieldPassphrase] = strings.TrimSpace(AM.editor.secretValues[editorFieldPassphrase]) == ""
+	}
+
 	host := strings.TrimSpace(AM.editor.inputs[editorFieldHost].Value())
 	if host == "" {
 		return setTip(am.t("host is required", "主机不能为空"), tipWarn)
@@ -550,6 +789,7 @@ func (am *AppModel) saveEditor() tea.Cmd {
 	}
 
 	bookmark := AM.editor.original
+	bookmark.PrivateKey = restorePrivateKeyNewlinesIfCollapsed(decodePrivateKeyFromDisplay(bookmark.PrivateKey))
 	title := strings.TrimSpace(AM.editor.inputs[editorFieldTitle].Value())
 	if title == "" {
 		title = host
@@ -570,7 +810,7 @@ func (am *AppModel) saveEditor() tea.Cmd {
 		}
 	case authTypePrivateKey:
 		bookmark.AuthType = "private-key"
-		bookmark.PrivateKey = AM.editor.secretValues[editorFieldPrivateKey]
+		bookmark.PrivateKey, privateKeyPathStatus = resolvePrivateKeyMaybePath(AM.editor.secretValues[editorFieldPrivateKey])
 		bookmark.Passphrase = AM.editor.secretValues[editorFieldPassphrase]
 		if strictApply {
 			bookmark.Password = ""
@@ -629,7 +869,25 @@ func (am *AppModel) saveEditor() tea.Cmd {
 		}
 	}
 	if len(previous) == len(AM.BookmarkInfo.List) {
+		if privateKeyPathStatus == "path_loaded" {
+			return setTip(am.t("bookmark updated; private key loaded from file path", "书签已更新；私钥已从文件路径读取"), tipSuccess)
+		}
+		if privateKeyPathStatus == "path_too_large" {
+			return setTip(am.t("bookmark updated; private key path kept as text because file is too large", "书签已更新；私钥文件过大，已保留路径文本"), tipWarn)
+		}
+		if privateKeyPathStatus == "path_unreadable" {
+			return setTip(am.t("bookmark updated; private key path unreadable, kept as text", "书签已更新；私钥路径无法读取，已保留路径文本"), tipWarn)
+		}
 		return setTip(am.t("bookmark updated", "书签已更新"), tipSuccess)
+	}
+	if privateKeyPathStatus == "path_loaded" {
+		return setTip(am.t("bookmark added; private key loaded from file path", "书签已新增；私钥已从文件路径读取"), tipSuccess)
+	}
+	if privateKeyPathStatus == "path_too_large" {
+		return setTip(am.t("bookmark added; private key path kept as text because file is too large", "书签已新增；私钥文件过大，已保留路径文本"), tipWarn)
+	}
+	if privateKeyPathStatus == "path_unreadable" {
+		return setTip(am.t("bookmark added; private key path unreadable, kept as text", "书签已新增；私钥路径无法读取，已保留路径文本"), tipWarn)
 	}
 	return setTip(am.t("bookmark added", "书签已新增"), tipSuccess)
 }
@@ -742,17 +1000,14 @@ func (am *AppModel) buildEditorOverlay(frameWidth, frameHeight int) string {
 		body.WriteString("\n")
 		if field == editorFieldAuthType {
 			body.WriteString("  " + am.editorAuthTypeView())
-		} else if field == editorFieldPrivateKey && AM.editor.showSecrets && strings.TrimSpace(AM.editor.secretValues[editorFieldPrivateKey]) != "" {
-			previewStyle := blurInputStyle
-			if isFocused {
-				previewStyle = focusInputStyle
-			}
-			preview := strings.Join(strings.Fields(strings.ReplaceAll(strings.ReplaceAll(AM.editor.secretValues[editorFieldPrivateKey], "\r\n", "\n"), "\n", " ")), " ")
-			body.WriteString("  " + previewStyle.Render(preview))
 		} else if isFocused {
 			body.WriteString("  " + focusInputStyle.Render(AM.editor.inputs[int(field)].View()))
 		} else {
 			body.WriteString("  " + blurInputStyle.Render(AM.editor.inputs[int(field)].View()))
+		}
+		if field == editorFieldPrivateKey {
+			hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+			body.WriteString("\n  " + hintStyle.Render(am.t("Paste key text or enter a key file path (loaded on save)", "可粘贴私钥文本或填写私钥文件路径（保存时读取）")))
 		}
 		if i != len(fields)-1 {
 			body.WriteString("\n\n")
@@ -766,8 +1021,8 @@ func (am *AppModel) buildEditorOverlay(frameWidth, frameHeight int) string {
 		titleIcon = "+ "
 		title = am.t("Add Bookmark", "新增书签")
 	}
-	help := fmt.Sprintf(am.t("tab switch · m auth · ^S save · ^R reveal/hide %s · ^Y copy all · esc",
-		"tab 切换 · m 认证 · ^S 保存 · ^R 显示/隐藏 %s · ^Y 全部复制 · esc"), AM.editor.modeHint(am))
+	help := fmt.Sprintf(am.t("tab switch · m auth · ^S save · ^R reveal/hide %s · ^Y copy all · ^U clear field · esc",
+		"tab 切换 · m 认证 · ^S 保存 · ^R 显示/隐藏 %s · ^Y 全部复制 · ^U 清空字段 · esc"), AM.editor.modeHint(am))
 	sepWidth := inputWidth + 2
 	if sepWidth > overlayWidth-2 {
 		sepWidth = overlayWidth - 2
