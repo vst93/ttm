@@ -1,47 +1,81 @@
+![](https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/screenshot/1.png)
+![](https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/screenshot/2.png)
+
 # TTM — Tiny Terminal Manager
 
 Lightweight SSH bookmark manager built with [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
-Manage, sync and connect to your servers from the terminal.
+Manage, sync and connect to your servers — all from the terminal.
 
 ## Features
 
-- Full TUI — no config files to hand-edit, everything is in the interface
-- SSH connect with password, private key, or keyboard-interactive auth
-- Bookmark CRUD — add, edit, delete, star/favorite
-- Gist sync — push/pull bookmarks via GitHub or Gitee Gist
-- In-app config — set token and gist ID without leaving the TUI
-- Filter & paginate — fuzzy search across bookmarks
-- i18n — English / 中文, toggle with `L`
-- Update check — press `u` to check for new releases
-- Cross-platform — macOS, Linux, Windows
+- **Full TUI** — no config files to hand-edit, everything is in the interface
+- **SSH connect** — password, private key, or keyboard-interactive auth
+- **Bookmark management** — add, edit, delete, star/favorite
+- **Gist sync** — push/pull bookmarks via GitHub or Gitee Gist
+- **In-app config** — set token and gist ID without leaving the TUI
+- **Filter & paginate** — fuzzy search across bookmarks
+- **i18n** — English / 中文, toggle with `L`
+- **Update check** — press `u` to check for new releases
+- **Cross-platform** — macOS, Linux, Windows, Android (Termux)
 
 ## Install
 
+### Homebrew (macOS / Linux)
+
 ```bash
-# Homebrew
 brew install vst93/tap/ttm
+```
 
-# Shell script
+### Shell script (macOS / Linux)
+
+```bash
 curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && bash install.sh
+```
 
-# Show installer options
+Show installer options:
+
+```bash
 curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && bash install.sh --help
+```
 
-# Custom install dir (optional)
+Custom install dir (optional):
+
+```bash
 curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && INSTALL_DIR="$HOME/.local/bin" bash install.sh
+```
+
+### Windows
+
+Download the latest `ttm-windows-*.zip` from [GitHub Releases](https://github.com/vst93/ttm/releases), extract `ttm.exe`, and add its directory to your `PATH`.
+
+Or build from source (requires [Go](https://go.dev/dl/)):
+
+```powershell
+git clone https://github.com/vst93/ttm.git && cd ttm
+```
+
+```powershell
+go build -o ttm.exe .
+```
+
+```powershell
+.\ttm.exe
 ```
 
 ### Termux (Android)
 
 ```bash
-pkg update && pkg install curl unzip && curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && bash install.sh
+pkg update && pkg install curl unzip
 ```
 
-- Default install path on Termux: `$PREFIX/bin`
-- Downloaded `install.sh` removes itself automatically after execution (set `AUTO_DELETE_INSTALL_SCRIPT=0` to keep it)
-- If checksum fetch/verify fails in non-interactive mode, installer aborts by default
-- You can force continue only when you trust the source: `FORCE_INSTALL=1 ...`
+```bash
+curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && bash install.sh
+```
+
+> - Default install path: `$PREFIX/bin`
+> - `install.sh` removes itself after execution (keep it with `AUTO_DELETE_INSTALL_SCRIPT=0`)
+> - Checksum failure in non-interactive mode aborts by default; force with `FORCE_INSTALL=1` only when you trust the source
 
 ## Keybindings
 
@@ -54,7 +88,7 @@ pkg update && pkg install curl unzip && curl -fsSL -o install.sh https://raw.git
 | `*` | Star / unstar |
 | `s` | Push to Gist |
 | `S` | Pull from Gist |
-| `c` | Sync config |
+| `c` | Open config editor |
 | `u` | Check for updates |
 | `L` | Toggle EN / 中文 |
 | `/` | Filter |
@@ -68,18 +102,21 @@ pkg update && pkg install curl unzip && curl -fsSL -o install.sh https://raw.git
 Bookmarks can be synced across machines via a private Gist.
 
 1. Press `c` to open the config editor
-2. Select platform (`github` / `gitee`)
+2. Select platform — `github` or `gitee`
 3. Enter your Personal Access Token (needs `gist` scope)
-   - GitHub: https://github.com/settings/tokens
-   - Gitee: https://gitee.com/personal_access_tokens
-4. Enter Gist ID (optional — leave empty to auto-create on first push)
+   - [GitHub Tokens](https://github.com/settings/tokens) · [Gitee Tokens](https://gitee.com/personal_access_tokens)
+4. Enter Gist ID (leave empty to auto-create on first push)
 5. `Ctrl+S` to save
 
 Then `s` to push, `S` to pull.
 
 ## Config
 
-Stored in `~/.config/ttm/` (macOS: `~/Library/Application Support/ttm/`):
+| OS | Path |
+|----|------|
+| Linux | `~/.config/ttm/` |
+| macOS | `~/Library/Application Support/ttm/` |
+| Windows | `%APPDATA%\ttm\` |
 
 ```
 config.json      # platform, token, gist_id, locale
@@ -90,9 +127,17 @@ bookmarks.json   # bookmark entries
 
 ```bash
 git clone https://github.com/vst93/ttm.git && cd ttm
-make build    # or: go build -o ttm .
+```
+
+```bash
+make build
+```
+
+```bash
 ./ttm
 ```
+
+> You can also run `go build -o ttm .` directly without Make.
 
 ## License
 
@@ -108,42 +153,73 @@ make build    # or: go build -o ttm .
 
 ## 特性
 
-- 全 TUI 界面 — 无需手动编辑配置文件，所有操作均在界面内完成
-- SSH 连接 — 支持密码、私钥、键盘交互三种认证方式
-- 书签管理 — 新增、编辑、删除、收藏
-- Gist 同步 — 通过 GitHub 或 Gitee Gist 推送 / 拉取书签
-- 应用内配置 — 无需离开 TUI 即可设置 Token 和 Gist ID
-- 搜索与分页 — 模糊过滤书签列表
-- 双语 — English / 中文，按 `L` 切换
-- 版本检查 — 按 `u` 检查新版本
-- 跨平台 — macOS、Linux、Windows
+- **全 TUI 界面** — 无需手动编辑配置文件，所有操作均在界面内完成
+- **SSH 连接** — 支持密码、私钥、键盘交互三种认证方式
+- **书签管理** — 新增、编辑、删除、收藏
+- **Gist 同步** — 通过 GitHub 或 Gitee Gist 推送 / 拉取书签
+- **应用内配置** — 无需离开 TUI 即可设置 Token 和 Gist ID
+- **搜索与分页** — 模糊过滤书签列表
+- **双语** — English / 中文，按 `L` 切换
+- **版本检查** — 按 `u` 检查新版本
+- **跨平台** — macOS、Linux、Windows、Android (Termux)
 
 ## 安装
 
+### Homebrew (macOS / Linux)
+
 ```bash
-# Homebrew
 brew install vst93/tap/ttm
+```
 
-# 脚本安装
+### 脚本安装（macOS / Linux）
+
+```bash
 curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && bash install.sh
+```
 
-# 查看安装脚本参数
+查看安装脚本参数：
+
+```bash
 curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && bash install.sh --help
+```
 
-# 可选：自定义安装目录
+自定义安装目录（可选）：
+
+```bash
 curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && INSTALL_DIR="$HOME/.local/bin" bash install.sh
+```
+
+### Windows
+
+从 [GitHub Releases](https://github.com/vst93/ttm/releases) 下载最新的 `ttm-windows-*.zip`，解压 `ttm.exe`，将其所在目录添加到 `PATH` 即可使用。
+
+或从源码构建（需要 [Go](https://go.dev/dl/)）：
+
+```powershell
+git clone https://github.com/vst93/ttm.git && cd ttm
+```
+
+```powershell
+go build -o ttm.exe .
+```
+
+```powershell
+.\ttm.exe
 ```
 
 ### Termux（Android）
 
 ```bash
-pkg update && pkg install curl unzip && curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && bash install.sh
+pkg update && pkg install curl unzip
 ```
 
-- Termux 默认安装目录为 `$PREFIX/bin`
-- 下载的 `install.sh` 在执行后会自动删除（如需保留可设置 `AUTO_DELETE_INSTALL_SCRIPT=0`）
-- 在非交互环境中，如果校验信息获取失败或 SHA256 不匹配，脚本默认中止
-- 仅在确认来源可信时才强制继续：`FORCE_INSTALL=1 ...`
+```bash
+curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && bash install.sh
+```
+
+> - 默认安装目录：`$PREFIX/bin`
+> - `install.sh` 执行后自动删除（如需保留可设置 `AUTO_DELETE_INSTALL_SCRIPT=0`）
+> - 非交互环境下校验失败默认中止；仅在确认来源可信时使用 `FORCE_INSTALL=1` 强制继续
 
 ## 快捷键
 
@@ -156,7 +232,7 @@ pkg update && pkg install curl unzip && curl -fsSL -o install.sh https://raw.git
 | `*` | 标星 / 取消标星 |
 | `s` | 推送到 Gist |
 | `S` | 从 Gist 拉取 |
-| `c` | 同步配置 |
+| `c` | 打开配置编辑器 |
 | `u` | 检查更新 |
 | `L` | 切换 EN / 中文 |
 | `/` | 过滤 |
@@ -170,18 +246,21 @@ pkg update && pkg install curl unzip && curl -fsSL -o install.sh https://raw.git
 书签可通过私有 Gist 在多台设备间同步。
 
 1. 按 `c` 打开配置编辑器
-2. 选择平台（`github` / `gitee`）
+2. 选择平台 — `github` 或 `gitee`
 3. 输入 Personal Access Token（需要 `gist` 权限）
-   - GitHub：https://github.com/settings/tokens
-   - Gitee：https://gitee.com/personal_access_tokens
-4. 输入 Gist ID（可选 — 留空则首次推送时自动创建）
+   - [GitHub Tokens](https://github.com/settings/tokens) · [Gitee Tokens](https://gitee.com/personal_access_tokens)
+4. 输入 Gist ID（留空则首次推送时自动创建）
 5. `Ctrl+S` 保存
 
 之后按 `s` 推送，`S` 拉取。
 
 ## 配置文件
 
-存储于 `~/.config/ttm/`（macOS：`~/Library/Application Support/ttm/`）：
+| 系统 | 路径 |
+|------|------|
+| Linux | `~/.config/ttm/` |
+| macOS | `~/Library/Application Support/ttm/` |
+| Windows | `%APPDATA%\ttm\` |
 
 ```
 config.json      # 平台、令牌、Gist ID、语言
@@ -192,9 +271,17 @@ bookmarks.json   # 书签数据
 
 ```bash
 git clone https://github.com/vst93/ttm.git && cd ttm
-make build    # 或：go build -o ttm .
+```
+
+```bash
+make build
+```
+
+```bash
 ./ttm
 ```
+
+> 也可以直接运行 `go build -o ttm .`，无需 Make。
 
 ## 许可证
 
