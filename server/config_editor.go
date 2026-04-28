@@ -222,7 +222,7 @@ func (am *AppModel) handleConfigEditorKey(msg tea.KeyMsg) tea.Cmd {
 			AM.configEditor.cyclePlatform()
 			return AM.configEditor.setFocus(AM.configEditor.focusIndex)
 		}
-	case "m":
+	case "enter":
 		if AM.configEditor.focusedField() == configFieldPlatform {
 			AM.configEditor.cyclePlatform()
 			return AM.configEditor.setFocus(AM.configEditor.focusIndex)
@@ -302,7 +302,7 @@ func (am *AppModel) configPlatformView() string {
 	if current == "" {
 		current = "github"
 	}
-	hint := am.t("<- -> / m switch", "<- -> / m 切换")
+	hint := am.t("<- -> / ^M switch", "<- -> / ^M 切换")
 	valueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)
 	arrowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))

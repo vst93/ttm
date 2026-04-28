@@ -642,7 +642,13 @@ func (am *AppModel) handleEditorKey(msg tea.KeyMsg) tea.Cmd {
 		return AM.editor.setFocus(AM.editor.focusIndex + 1)
 	case "shift+tab", "up":
 		return AM.editor.setFocus(AM.editor.focusIndex - 1)
-	case "m":
+	case "enter":
+		// 在私钥字段且显示密钥时，Enter 用于插入换行
+		if AM.editor.focusedField() == editorFieldPrivateKey && AM.editor.showSecrets {
+			insertIntoPrivateKeyInput("\\n")
+			return nil
+		}
+		// 否则切换认证类型
 		AM.editor.cycleAuthType()
 		return AM.editor.setFocus(AM.editor.focusIndex)
 	case "ctrl+r":
@@ -1021,8 +1027,8 @@ func (am *AppModel) buildEditorOverlay(frameWidth, frameHeight int) string {
 		titleIcon = "+ "
 		title = am.t("Add Bookmark", "新增书签")
 	}
-	help := fmt.Sprintf(am.t("tab switch · m auth · ^S save · ^R reveal/hide %s · ^Y copy all · ^U clear field · esc",
-		"tab 切换 · m 认证 · ^S 保存 · ^R 显示/隐藏 %s · ^Y 全部复制 · ^U 清空字段 · esc"), AM.editor.modeHint(am))
+	help := fmt.Sprintf(am.t("tab switch · ^M auth · ^S save · ^R reveal/hide %s · ^Y copy all · ^U clear field · esc",
+		"tab 切换 · ^M 认证 · ^S 保存 · ^R 显示/隐藏 %s · ^Y 全部复制 · ^U 清空字段 · esc"), AM.editor.modeHint(am))
 	sepWidth := inputWidth + 2
 	if sepWidth > overlayWidth-2 {
 		sepWidth = overlayWidth - 2
@@ -1062,26 +1068,37 @@ func (am *AppModel) buildEditorOverlay(frameWidth, frameHeight int) string {
 	AM.editor.viewport = viewport.New(viewportWidth, viewportHeight)
 	AM.editor.viewport.SetContent(content)
 	AM.editor.viewport.SetYOffset(AM.editor.scroll)
-	if AM.editor.scrollToFocus {
-		AM.editor.scrollToFocus = false
-		focusedIndex := AM.editor.focusIndex
-		if focusedIndex < 0 {
-			focusedIndex = 0
-		}
-		// 3 header lines (title + help + blank), then 3 lines per field
-		lineCursor := 3 + focusedIndex*3
-		yOffset := AM.editor.viewport.YOffset
-		if lineCursor+1 >= yOffset+viewportHeight {
-			yOffset = lineCursor + 2 - viewportHeight
-		}
-		if lineCursor < yOffset {
-			yOffset = lineCursor
-		}
-		if yOffset < 0 {
-			yOffset = 0
-		}
-		AM.editor.viewport.SetYOffset(yOffset)
+if AM.editor.scrollToFocus {
+	AM.editor.scrollToFocus = false
+	focusedIndex := AM.editor.focusIndex
+	if focusedIndex < 0 {
+		focusedIndex = 0
 	}
+	// 计算聚焦字段标签行的准确位置：头部 3 行 + 各字段块的累计高度
+	lineCursor := 3
+	fields := AM.editor.activeFields()
+	if focusedIndex >= len(fields) {
+		focusedIndex = len(fields) - 1
+	}
+	for i := 0; i < focusedIndex; i++ {
+		if fields[i] == editorFieldPrivateKey {
+			lineCursor += 4 // 标签+输入+提示+段间空行
+		} else {
+			lineCursor += 3 // 标签+输入+段间空行
+		}
+	}
+	yOffset := AM.editor.viewport.YOffset
+	if lineCursor+1 >= yOffset+viewportHeight {
+		yOffset = lineCursor + 2 - viewportHeight
+	}
+	if lineCursor < yOffset {
+		yOffset = lineCursor
+	}
+	if yOffset < 0 {
+		yOffset = 0
+	}
+	AM.editor.viewport.SetYOffset(yOffset)
+}
 	AM.editor.scroll = AM.editor.viewport.YOffset
 
 	return lipgloss.NewStyle().
