@@ -222,7 +222,7 @@ func (am *AppModel) handleConfigEditorKey(msg tea.KeyMsg) tea.Cmd {
 			AM.configEditor.cyclePlatform()
 			return AM.configEditor.setFocus(AM.configEditor.focusIndex)
 		}
-	case "ctrl+m":
+	case "enter":
 		if AM.configEditor.focusedField() == configFieldPlatform {
 			AM.configEditor.cyclePlatform()
 			return AM.configEditor.setFocus(AM.configEditor.focusIndex)

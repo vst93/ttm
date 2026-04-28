@@ -642,7 +642,13 @@ func (am *AppModel) handleEditorKey(msg tea.KeyMsg) tea.Cmd {
 		return AM.editor.setFocus(AM.editor.focusIndex + 1)
 	case "shift+tab", "up":
 		return AM.editor.setFocus(AM.editor.focusIndex - 1)
-	case "ctrl+m":
+	case "enter":
+		// 在私钥字段且显示密钥时，Enter 用于插入换行
+		if AM.editor.focusedField() == editorFieldPrivateKey && AM.editor.showSecrets {
+			insertIntoPrivateKeyInput("\\n")
+			return nil
+		}
+		// 否则切换认证类型
 		AM.editor.cycleAuthType()
 		return AM.editor.setFocus(AM.editor.focusIndex)
 	case "ctrl+r":
