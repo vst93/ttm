@@ -1068,26 +1068,37 @@ func (am *AppModel) buildEditorOverlay(frameWidth, frameHeight int) string {
 	AM.editor.viewport = viewport.New(viewportWidth, viewportHeight)
 	AM.editor.viewport.SetContent(content)
 	AM.editor.viewport.SetYOffset(AM.editor.scroll)
-	if AM.editor.scrollToFocus {
-		AM.editor.scrollToFocus = false
-		focusedIndex := AM.editor.focusIndex
-		if focusedIndex < 0 {
-			focusedIndex = 0
-		}
-		// 3 header lines (title + help + blank), then 3 lines per field
-		lineCursor := 3 + focusedIndex*3
-		yOffset := AM.editor.viewport.YOffset
-		if lineCursor+1 >= yOffset+viewportHeight {
-			yOffset = lineCursor + 2 - viewportHeight
-		}
-		if lineCursor < yOffset {
-			yOffset = lineCursor
-		}
-		if yOffset < 0 {
-			yOffset = 0
-		}
-		AM.editor.viewport.SetYOffset(yOffset)
+if AM.editor.scrollToFocus {
+	AM.editor.scrollToFocus = false
+	focusedIndex := AM.editor.focusIndex
+	if focusedIndex < 0 {
+		focusedIndex = 0
 	}
+	// 计算聚焦字段标签行的准确位置：头部 3 行 + 各字段块的累计高度
+	lineCursor := 3
+	fields := AM.editor.activeFields()
+	if focusedIndex >= len(fields) {
+		focusedIndex = len(fields) - 1
+	}
+	for i := 0; i < focusedIndex; i++ {
+		if fields[i] == editorFieldPrivateKey {
+			lineCursor += 4 // 标签+输入+提示+段间空行
+		} else {
+			lineCursor += 3 // 标签+输入+段间空行
+		}
+	}
+	yOffset := AM.editor.viewport.YOffset
+	if lineCursor+1 >= yOffset+viewportHeight {
+		yOffset = lineCursor + 2 - viewportHeight
+	}
+	if lineCursor < yOffset {
+		yOffset = lineCursor
+	}
+	if yOffset < 0 {
+		yOffset = 0
+	}
+	AM.editor.viewport.SetYOffset(yOffset)
+}
 	AM.editor.scroll = AM.editor.viewport.YOffset
 
 	return lipgloss.NewStyle().
