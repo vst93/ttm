@@ -2585,7 +2585,7 @@ func TestEditorAuthModeSwitchShowsOnlyRelevantFields(t *testing.T) {
 		t.Fatalf("expected private key field hidden in password mode")
 	}
 
-	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlM})
 	view = am.View()
 	if !strings.Contains(view, "Private Key") || !strings.Contains(view, "Passphrase") {
 		t.Fatalf("expected key fields in private-key mode")
@@ -2594,7 +2594,7 @@ func TestEditorAuthModeSwitchShowsOnlyRelevantFields(t *testing.T) {
 		t.Fatalf("expected password field hidden in private-key mode")
 	}
 
-	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlM})
 	view = am.View()
 	if strings.Contains(view, "Password") || strings.Contains(view, "Private Key") || strings.Contains(view, "Passphrase") {
 		t.Fatalf("expected secret fields hidden in keyboard-interactive mode")
@@ -2625,8 +2625,8 @@ func TestEditorKeyboardModeSaveClearsSecretFields(t *testing.T) {
 	createList()
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
-	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlM})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlM})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 
 	updated := AM.BookmarkInfo.List[0]
@@ -2655,7 +2655,7 @@ func TestEditorSmallWindowUsesScrollableStableLayout(t *testing.T) {
 	createList()
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlM})
 
 	_ = am.View()
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyPgDown})

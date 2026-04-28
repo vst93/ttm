@@ -642,7 +642,7 @@ func (am *AppModel) handleEditorKey(msg tea.KeyMsg) tea.Cmd {
 		return AM.editor.setFocus(AM.editor.focusIndex + 1)
 	case "shift+tab", "up":
 		return AM.editor.setFocus(AM.editor.focusIndex - 1)
-	case "m":
+	case "ctrl+m":
 		AM.editor.cycleAuthType()
 		return AM.editor.setFocus(AM.editor.focusIndex)
 	case "ctrl+r":
@@ -1021,8 +1021,8 @@ func (am *AppModel) buildEditorOverlay(frameWidth, frameHeight int) string {
 		titleIcon = "+ "
 		title = am.t("Add Bookmark", "新增书签")
 	}
-	help := fmt.Sprintf(am.t("tab switch · m auth · ^S save · ^R reveal/hide %s · ^Y copy all · ^U clear field · esc",
-		"tab 切换 · m 认证 · ^S 保存 · ^R 显示/隐藏 %s · ^Y 全部复制 · ^U 清空字段 · esc"), AM.editor.modeHint(am))
+	help := fmt.Sprintf(am.t("tab switch · ^M auth · ^S save · ^R reveal/hide %s · ^Y copy all · ^U clear field · esc",
+		"tab 切换 · ^M 认证 · ^S 保存 · ^R 显示/隐藏 %s · ^Y 全部复制 · ^U 清空字段 · esc"), AM.editor.modeHint(am))
 	sepWidth := inputWidth + 2
 	if sepWidth > overlayWidth-2 {
 		sepWidth = overlayWidth - 2
