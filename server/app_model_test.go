@@ -19,6 +19,20 @@ func setupBookmarkTempDir(t *testing.T) string {
 	return dir
 }
 
+func TestRenderDetailSupportsAtInUsername(t *testing.T) {
+	rendered := renderDetail("name@domain@example.com:22", false)
+
+	if !strings.Contains(rendered, "name@domain") {
+		t.Fatalf("expected username with @ to be preserved, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "example.com") {
+		t.Fatalf("expected host to be preserved, got %q", rendered)
+	}
+	if !strings.Contains(rendered, ":22") {
+		t.Fatalf("expected port to be preserved, got %q", rendered)
+	}
+}
+
 func TestViewIncludesTipString(t *testing.T) {
 	AM = AppModel{}
 	am := &AM
