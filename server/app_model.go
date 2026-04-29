@@ -150,9 +150,8 @@ func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list
 }
 
 func renderDetail(detail string, selected bool) string {
-	// Parse user@host:port
 	user, rest := detail, ""
-	if at := strings.Index(detail, "@"); at >= 0 {
+	if at := strings.LastIndex(detail, "@"); at >= 0 {
 		user = detail[:at]
 		rest = detail[at+1:]
 	} else {
