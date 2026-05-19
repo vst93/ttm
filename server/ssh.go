@@ -187,19 +187,11 @@ func (c *defaultClient) Login() error {
 		}
 	}
 
-	stdinReader, err := cancelreader.NewReader(os.Stdin)
+	stdinCopyDone, cancelStdinCopy, err := startStdinCopy(stdinPipe)
 	if err != nil {
 		return fmt.Errorf("open local stdin reader: %w", err)
 	}
-	defer stdinReader.Close()
-
-	// change stdin to user
-	stdinCopyDone := make(chan error, 1)
-	go func() {
-		_, copyErr := io.Copy(stdinPipe, stdinReader)
-		stdinCopyDone <- copyErr
-		session.Close()
-	}()
+	defer cancelStdinCopy()
 
 	// interval get terminal size
 	// fix resize issue
@@ -235,7 +227,7 @@ func (c *defaultClient) Login() error {
 	}()
 
 	waitErr := session.Wait()
-	stdinReader.Cancel()
+	cancelStdinCopy()
 	copyErr := <-stdinCopyDone
 	if !isStdinCopyErrBenign(copyErr) {
 		return copyErr
