@@ -2,8 +2,10 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -200,6 +202,7 @@ type AppModel struct {
 	isConnecting  bool
 	isUpdating    bool
 	isSyncing     bool
+	enterKeyAt    time.Time
 	width         int
 	height        int
 }
@@ -542,45 +545,53 @@ func buildSSHClient(bookmark BookmarkItem, port int) (*defaultClient, error) {
 	return genSSHConfig(sshConfig)
 }
 
-func needInteractiveConnect(bookmark BookmarkItem) bool {
-	authType := strings.TrimSpace(bookmark.AuthType)
-	if authType == "keyboard-interactive" {
-		return true
+func describeConnectError(err error) string {
+	if err == nil {
+		return ""
 	}
-	if authType == "password" || authType == "private-key" {
-		return false
+
+	detail := err.Error()
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return AM.t("Reason: network timeout while connecting to host\nCheck: host, port, VPN, firewall, or server reachability\nDetail: ", "原因：连接主机网络超时\n建议：检查主机、端口、VPN、防火墙或服务器可达性\n详情：") + detail
 	}
-	return strings.TrimSpace(bookmark.Password) == "" && strings.TrimSpace(bookmark.PrivateKey) == ""
+
+	msg := strings.ToLower(detail)
+	switch {
+	case strings.Contains(msg, "connection refused"):
+		return AM.t("Reason: SSH port refused the connection\nCheck: port number and sshd service status on the server\nDetail: ", "原因：SSH 端口拒绝连接\n建议：检查端口号以及服务器上的 sshd 服务状态\n详情：") + detail
+	case strings.Contains(msg, "no route to host") || strings.Contains(msg, "network is unreachable"):
+		return AM.t("Reason: host is unreachable from this network\nCheck: network route, VPN, firewall, or server security group\nDetail: ", "原因：当前网络无法到达主机\n建议：检查网络路由、VPN、防火墙或服务器安全组\n详情：") + detail
+	case strings.Contains(msg, "no such host") || strings.Contains(msg, "server misbehaving"):
+		return AM.t("Reason: host name cannot be resolved\nCheck: host address spelling and DNS configuration\nDetail: ", "原因：主机名无法解析\n建议：检查主机地址拼写和 DNS 配置\n详情：") + detail
+	case strings.Contains(msg, "unable to authenticate") || strings.Contains(msg, "no supported methods remain") || strings.Contains(msg, "permission denied"):
+		return AM.t("Reason: authentication failed\nCheck: username, password, private key, passphrase, and auth type\nDetail: ", "原因：认证失败\n建议：检查用户名、密码、私钥、密钥密码和认证方式\n详情：") + detail
+	case strings.Contains(msg, "knownhosts") || strings.Contains(msg, "host key"):
+		return AM.t("Reason: host key verification failed\nCheck: server fingerprint or known_hosts entry\nDetail: ", "原因：主机密钥校验失败\n建议：检查服务器指纹或 known_hosts 记录\n详情：") + detail
+	case strings.Contains(msg, "request remote pty") || strings.Contains(msg, "pty"):
+		return AM.t("Reason: remote PTY allocation failed\nCheck: whether the server allows PTY and whether the terminal type is supported\nDetail: ", "原因：远端 PTY 分配失败\n建议：检查服务器是否允许 PTY，以及终端类型是否受支持\n详情：") + detail
+	case strings.Contains(msg, "remote shell exited"):
+		return AM.t("Reason: remote shell exited with an error\nCheck: the command output above; remote TUI programs may need TERM and UTF-8 locale support\nDetail: ", "原因：远端 shell 异常退出\n建议：查看上方命令输出；远端 TUI 程序可能需要 TERM 和 UTF-8 locale 支持\n详情：") + detail
+	}
+
+	return AM.t("Reason: SSH connection failed\nCheck: the detail below and the remote command output if any\nDetail: ", "原因：SSH 连接失败\n建议：查看下方详情以及可能存在的远端命令输出\n详情：") + detail
+}
+
+func connectFailureTip(prefix string, err error) string {
+	return prefix + "\n" + describeConnectError(err)
+}
+
+func connectEnterRepeated(now time.Time, last time.Time) bool {
+	return !last.IsZero() && now.Sub(last) < 500*time.Millisecond
 }
 
 func connectExecCmd(sshClient *defaultClient, successTip, failurePrefix string) tea.Cmd {
 	return tea.Exec(sshLoginExecCommand{client: sshClient}, func(err error) tea.Msg {
 		if err != nil {
-			return connectResultMsg{Success: false, Tip: failurePrefix + err.Error()}
+			return connectResultMsg{Success: false, Tip: connectFailureTip(failurePrefix, err)}
 		}
 		return connectResultMsg{Success: true, Tip: successTip}
 	})
-}
-
-func probeConnectCmd(sshClient *defaultClient, bookmark BookmarkItem, port int) tea.Cmd {
-	return func() tea.Msg {
-		authMode := authModeText(bookmark)
-		err := sshClient.ProbeConnection(5 * time.Second)
-		if err != nil {
-			return probeResultMsg{
-				Success: false,
-				Tip:     fmt.Sprintf(AM.t("connection failed %s@%s:%d (%s): %s", "连接失败 %s@%s:%d (%s): %s"), bookmark.Username, bookmark.Host, port, authMode, err.Error()),
-			}
-		}
-
-		return probeResultMsg{
-			Success:       true,
-			Tip:           fmt.Sprintf(AM.t("connected %s@%s:%d (%s)", "已建立连接 %s@%s:%d (%s)"), bookmark.Username, bookmark.Host, port, authMode),
-			SSHClient:     sshClient,
-			SuccessTip:    fmt.Sprintf(AM.t("session closed %s@%s:%d (%s)", "会话结束 %s@%s:%d (%s)"), bookmark.Username, bookmark.Host, port, authMode),
-			FailurePrefix: fmt.Sprintf(AM.t("connection failed %s@%s:%d (%s): ", "连接失败 %s@%s:%d (%s): "), bookmark.Username, bookmark.Host, port, authMode),
-		}
-	}
 }
 
 func blockSize(text string) (int, int) {
@@ -689,6 +700,74 @@ func overlayCenter(base, overlay string) string {
 		y = 0
 	}
 	return overlayAt(base, overlay, x, y)
+}
+
+func wrapTipLine(line string, maxWidth int) []string {
+	if line == "" {
+		return []string{""}
+	}
+
+	var lines []string
+	var current strings.Builder
+	currentWidth := 0
+	for _, r := range line {
+		part := string(r)
+		partWidth := ansi.StringWidth(part)
+		if currentWidth > 0 && currentWidth+partWidth > maxWidth {
+			lines = append(lines, current.String())
+			current.Reset()
+			currentWidth = 0
+		}
+		current.WriteString(part)
+		currentWidth += partWidth
+	}
+	if current.Len() > 0 {
+		lines = append(lines, current.String())
+	}
+	return lines
+}
+
+func wrapTipText(text string, maxWidth int) []string {
+	var lines []string
+	for _, line := range strings.Split(text, "\n") {
+		lines = append(lines, wrapTipLine(line, maxWidth)...)
+	}
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
+}
+
+func buildTipText(text string, level tipLevel, maxWidth, maxHeight int) string {
+	if maxWidth < 16 {
+		maxWidth = 16
+	}
+	if maxHeight < 1 {
+		maxHeight = 1
+	}
+
+	prefix := ""
+	switch level {
+	case tipProgress:
+		prefix = "⋯ "
+	case tipSuccess:
+		prefix = "✓ "
+	case tipWarn:
+		prefix = "! "
+	case tipError:
+		prefix = "✗ "
+	}
+
+	lines := wrapTipText(text, maxWidth)
+	lines[0] = prefix + lines[0]
+	if ansi.StringWidth(lines[0]) > maxWidth {
+		lines[0] = ansi.Truncate(lines[0], maxWidth, "…")
+	}
+	if len(lines) > maxHeight {
+		lines = lines[:maxHeight]
+		lines[maxHeight-1] = ansi.Truncate(lines[maxHeight-1], maxWidth, "…")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func tipStyle(level tipLevel) lipgloss.Style {
@@ -837,6 +916,12 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return am, am.openSyncConfirm(syncActionPull)
 		} else if msg.String() == "enter" {
+			now := time.Now()
+			if connectEnterRepeated(now, AM.enterKeyAt) {
+				return am, nil
+			}
+			AM.enterKeyAt = now
+
 			bookmark, port, err := buildConnectTarget()
 			if err != nil {
 				return am, setTip(err.Error(), tipWarn)
@@ -845,17 +930,14 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			sshClient, err := buildSSHClient(bookmark, port)
 			if err != nil {
-				return am, setTip(fmt.Sprintf(am.t("connection config failed %s@%s:%d (%s): %s", "连接配置失败 %s@%s:%d (%s): %s"), bookmark.Username, bookmark.Host, port, authMode, err.Error()), tipError)
+				return am, setTip(connectFailureTip(fmt.Sprintf(am.t("connection config failed %s@%s:%d (%s): ", "连接配置失败 %s@%s:%d (%s): "), bookmark.Username, bookmark.Host, port, authMode), err), tipError)
 			}
 
 			AM.isConnecting = true
 			tipCmd := setTip(fmt.Sprintf(am.t("connecting %s@%s:%d (%s)...", "正在连接 %s@%s:%d (%s)..."), bookmark.Username, bookmark.Host, port, authMode), tipProgress)
-			if needInteractiveConnect(bookmark) {
-				successTip := fmt.Sprintf(am.t("session closed %s@%s:%d (%s)", "会话结束 %s@%s:%d (%s)"), bookmark.Username, bookmark.Host, port, authMode)
-				failurePrefix := fmt.Sprintf(am.t("connection failed %s@%s:%d (%s): ", "连接失败 %s@%s:%d (%s): "), bookmark.Username, bookmark.Host, port, authMode)
-				return am, tea.Sequence(tipCmd, connectExecCmd(sshClient, successTip, failurePrefix))
-			}
-			return am, tea.Sequence(tipCmd, probeConnectCmd(sshClient, bookmark, port))
+			successTip := fmt.Sprintf(am.t("session closed %s@%s:%d (%s)", "会话结束 %s@%s:%d (%s)"), bookmark.Username, bookmark.Host, port, authMode)
+			failurePrefix := fmt.Sprintf(am.t("connection failed %s@%s:%d (%s): ", "连接失败 %s@%s:%d (%s): "), bookmark.Username, bookmark.Host, port, authMode)
+			return am, tea.Sequence(tipCmd, connectExecCmd(sshClient, successTip, failurePrefix))
 		}
 		// Navigation wrapping
 		if am.list.FilterState() == list.Unfiltered {
@@ -1072,27 +1154,24 @@ func (am *AppModel) View() string {
 
 	tipOverlay := ""
 	if hasTip {
-		maxTipWidth := frameWidth / 2
-		if maxTipWidth < 24 {
-			maxTipWidth = 24
+		maxTipWidth := (frameWidth * 2) / 3
+		if maxTipWidth < 32 {
+			maxTipWidth = 32
 		}
 		if maxTipWidth > frameWidth-8 {
 			maxTipWidth = frameWidth - 8
 		}
-		if maxTipWidth < 16 {
-			maxTipWidth = 16
+		maxTipHeight := frameHeight / 3
+		if maxTipHeight < 4 {
+			maxTipHeight = 4
 		}
-		tipText := ansi.Truncate(AM.TipString, maxTipWidth, "…")
-		switch AM.tipLevel {
-		case tipProgress:
-			tipText = "⋯ " + tipText
-		case tipSuccess:
-			tipText = "✓ " + tipText
-		case tipWarn:
-			tipText = "! " + tipText
-		case tipError:
-			tipText = "✗ " + tipText
+		if maxTipHeight > frameHeight-4 {
+			maxTipHeight = frameHeight - 4
 		}
+		if maxTipHeight < 1 {
+			maxTipHeight = 1
+		}
+		tipText := buildTipText(AM.TipString, AM.tipLevel, maxTipWidth, maxTipHeight)
 		tipOverlay = tipStyle(AM.tipLevel).Render(tipText)
 	}
 

@@ -2,10 +2,13 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -51,6 +54,27 @@ func TestViewIncludesTipString(t *testing.T) {
 	}
 }
 
+func TestViewWrapsLongTipWithoutDroppingDetail(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+
+	AM.BookmarkInfo.List = []BookmarkItem{
+		{Title: "prod", Host: "10.0.0.1", Port: 22, Username: "root", EnableSSH: true},
+	}
+	AM.width = 100
+	AM.height = 30
+	createList()
+	AM.tipLevel = tipError
+	AM.TipString = "connection failed root@example.com:22 (password):\nReason: authentication failed\nCheck: username, password, private key, passphrase, and auth type\nDetail: ssh: handshake failed: ssh: unable to authenticate, attempted methods [none password], no supported methods remain"
+
+	view := am.View()
+	if !strings.Contains(view, "Reason: authentication failed") {
+		t.Fatalf("expected wrapped tip to include reason, got: %q", view)
+	}
+	if !strings.Contains(view, "Detail: ssh: handshake failed") {
+		t.Fatalf("expected wrapped tip to include detail prefix, got: %q", view)
+	}
+}
 func TestWindowSizeMsgKeepsCurrentSelection(t *testing.T) {
 	AM = AppModel{}
 	am := &AM
@@ -337,55 +361,29 @@ func TestOverlayCenterPlacesTextInView(t *testing.T) {
 	}
 }
 
-func TestProbeResultMsgTriggersExecSequence(t *testing.T) {
+type timeoutTestError struct{}
+
+func (timeoutTestError) Error() string   { return "i/o timeout" }
+func (timeoutTestError) Timeout() bool   { return true }
+func (timeoutTestError) Temporary() bool { return true }
+
+func TestDescribeConnectErrorLocalizesAndClassifies(t *testing.T) {
 	AM = AppModel{}
-	am := &AM
+	AM.locale = localeEN
 
-	msg := probeResultMsg{
-		Success:       true,
-		Tip:           "connected",
-		SSHClient:     &defaultClient{},
-		SuccessTip:    "session closed",
-		FailurePrefix: "connection failed: ",
+	if got := describeConnectError(timeoutTestError{}); !strings.Contains(got, "network timeout") || !strings.Contains(got, "i/o timeout") {
+		t.Fatalf("expected english timeout detail, got %q", got)
+	}
+	if got := describeConnectError(errors.New("ssh: unable to authenticate")); !strings.Contains(got, "authentication failed") {
+		t.Fatalf("expected english auth detail, got %q", got)
 	}
 
-	_, cmd := am.Update(msg)
-	if cmd == nil {
-		t.Fatalf("expected command sequence after successful probe")
+	AM.locale = localeZH
+	if got := describeConnectError(&net.DNSError{Err: "no such host", Name: "bad-host"}); !strings.Contains(got, "主机名无法解析") || !strings.Contains(got, "bad-host") {
+		t.Fatalf("expected chinese dns detail, got %q", got)
 	}
-}
-
-func TestProbeResultMsgFailureSetsErrorTip(t *testing.T) {
-	AM = AppModel{}
-	am := &AM
-
-	_, cmd := am.Update(probeResultMsg{Success: false, Tip: "connection failed: timeout"})
-	if cmd == nil {
-		t.Fatalf("expected tip command on failed probe")
-	}
-	if AM.TipString != "connection failed: timeout" {
-		t.Fatalf("expected probe failure tip to be stored, got %q", AM.TipString)
-	}
-}
-
-func TestProbeResultMsgSuccessKeepsConnectingLockUntilExec(t *testing.T) {
-	AM = AppModel{}
-	am := &AM
-	AM.isConnecting = true
-
-	_, cmd := am.Update(probeResultMsg{
-		Success:       true,
-		Tip:           "connected",
-		SSHClient:     &defaultClient{},
-		SuccessTip:    "session closed",
-		FailurePrefix: "connection failed: ",
-	})
-
-	if cmd == nil {
-		t.Fatalf("expected exec sequence command for successful probe")
-	}
-	if !AM.isConnecting {
-		t.Fatalf("expected connecting lock to stay true until exec takes over")
+	if got := describeConnectError(errors.New("request remote PTY: ssh: pty-req failed")); !strings.Contains(got, "远端 PTY 分配失败") {
+		t.Fatalf("expected chinese pty detail, got %q", got)
 	}
 }
 
@@ -2742,75 +2740,16 @@ func TestEditorTabScrollsToLastFieldInSmallWindow(t *testing.T) {
 	}
 }
 
-func TestNeedInteractiveConnectDetectsKeyboardInteractiveAuth(t *testing.T) {
-	AM = AppModel{}
-
-	tests := []struct {
-		name     string
-		bookmark BookmarkItem
-		want     bool
-	}{
-		{
-			name: "explicit keyboard interactive",
-			bookmark: BookmarkItem{
-				AuthType: "keyboard-interactive",
-			},
-			want: true,
-		},
-		{
-			name: "explicit password",
-			bookmark: BookmarkItem{
-				AuthType: "password",
-				Password: "secret",
-			},
-			want: false,
-		},
-		{
-			name: "explicit private key",
-			bookmark: BookmarkItem{
-				AuthType:   "private-key",
-				PrivateKey: "KEY",
-			},
-			want: false,
-		},
-		{
-			name: "legacy fallback no secrets",
-			bookmark: BookmarkItem{
-				AuthType: "",
-			},
-			want: true,
-		},
-		{
-			name: "legacy fallback with password",
-			bookmark: BookmarkItem{
-				AuthType:   "",
-				Password:   "legacy-password",
-				PrivateKey: "",
-			},
-			want: false,
-		},
+func TestConnectEnterRepeated(t *testing.T) {
+	base := time.Now()
+	if connectEnterRepeated(base, time.Time{}) {
+		t.Fatalf("expected first enter to be allowed")
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := needInteractiveConnect(tc.bookmark)
-			if got != tc.want {
-				t.Fatalf("needInteractiveConnect(%+v) = %v, want %v", tc.bookmark, got, tc.want)
-			}
-		})
+	if !connectEnterRepeated(base.Add(100*time.Millisecond), base) {
+		t.Fatalf("expected enter repeat within debounce window to be blocked")
 	}
-}
-
-func TestNeedInteractiveConnectExplicitModes(t *testing.T) {
-	AM = AppModel{}
-	if !needInteractiveConnect(BookmarkItem{AuthType: "keyboard-interactive", Password: "", PrivateKey: ""}) {
-		t.Fatalf("expected interactive connect for keyboard-interactive auth type")
-	}
-	if needInteractiveConnect(BookmarkItem{AuthType: "password", Password: "secret"}) {
-		t.Fatalf("expected non-interactive connect for password auth type")
-	}
-	if needInteractiveConnect(BookmarkItem{AuthType: "private-key", PrivateKey: "KEY"}) {
-		t.Fatalf("expected non-interactive connect for private-key auth type")
+	if connectEnterRepeated(base.Add(600*time.Millisecond), base) {
+		t.Fatalf("expected enter after debounce window to be allowed")
 	}
 }
 
