@@ -76,17 +76,36 @@ func (c *defaultClient) ProbeConnection(timeout time.Duration) error {
 
 	client, err := ssh.Dial("tcp", net.JoinHostPort(host, port), &cfg)
 	if err != nil {
-		return err
+		return fmt.Errorf("dial SSH server: %w", err)
 	}
 	defer client.Close()
 
 	session, err := client.NewSession()
 	if err != nil {
-		return err
+		return fmt.Errorf("open SSH session: %w", err)
 	}
 	defer session.Close()
 
 	return nil
+}
+
+func sshTerm() string {
+	term := strings.TrimSpace(os.Getenv("TERM"))
+	if term == "" || term == "dumb" {
+		return "xterm-256color"
+	}
+	return term
+}
+
+func setSessionEnv(session *ssh.Session) {
+	envNames := []string{"TERM", "TERM_PROGRAM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE"}
+	for _, name := range envNames {
+		value := os.Getenv(name)
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		_ = session.Setenv(name, value)
+	}
 }
 
 func (c *defaultClient) Login() error {
@@ -94,7 +113,6 @@ func (c *defaultClient) Login() error {
 	port := strconv.Itoa(c.node.Port)
 	fmt.Printf("%s\n", fmt.Sprintf(AM.t("connecting %s@%s:%s ...", "正在连接 %s@%s:%s ..."), c.clientConfig.User, host, port))
 
-	var client *ssh.Client
 	client, err := ssh.Dial("tcp", net.JoinHostPort(host, port), c.clientConfig)
 	if err != nil {
 		msg := err.Error()
@@ -114,20 +132,20 @@ func (c *defaultClient) Login() error {
 		}
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("dial SSH server: %w", err)
 	}
 	defer client.Close()
 
 	session, err := client.NewSession()
 	if err != nil {
-		return err
+		return fmt.Errorf("open SSH session: %w", err)
 	}
 	defer session.Close()
 
 	fd := int(os.Stdin.Fd())
 	state, err := terminal.MakeRaw(fd)
 	if err != nil {
-		return err
+		return fmt.Errorf("enable local raw terminal mode: %w", err)
 	}
 	defer terminal.Restore(fd, state)
 
@@ -136,29 +154,28 @@ func (c *defaultClient) Login() error {
 	w, h, err := terminal.GetSize(int(os.Stdout.Fd()))
 
 	if err != nil {
-		return err
+		return fmt.Errorf("read local terminal size: %w", err)
 	}
 
+	setSessionEnv(session)
 	modes := ssh.TerminalModes{
-		ssh.ECHO:          1,
-		ssh.TTY_OP_ISPEED: 14400,
-		ssh.TTY_OP_OSPEED: 14400,
+		ssh.ECHO: 1,
 	}
-	err = session.RequestPty("xterm", h, w, modes)
+	err = session.RequestPty(sshTerm(), h, w, modes)
 	if err != nil {
-		return err
+		return fmt.Errorf("request remote PTY: %w", err)
 	}
 
 	session.Stdout = os.Stdout
 	session.Stderr = os.Stderr
 	stdinPipe, err := session.StdinPipe()
 	if err != nil {
-		return err
+		return fmt.Errorf("open remote stdin pipe: %w", err)
 	}
 
 	err = session.Shell()
 	if err != nil {
-		return err
+		return fmt.Errorf("start remote shell: %w", err)
 	}
 
 	// then callback
@@ -172,7 +189,7 @@ func (c *defaultClient) Login() error {
 
 	stdinReader, err := cancelreader.NewReader(os.Stdin)
 	if err != nil {
-		return err
+		return fmt.Errorf("open local stdin reader: %w", err)
 	}
 	defer stdinReader.Close()
 
@@ -224,7 +241,7 @@ func (c *defaultClient) Login() error {
 		return copyErr
 	}
 	if waitErr != nil {
-		return waitErr
+		return fmt.Errorf("remote shell exited: %w", waitErr)
 	}
 
 	// SSH 会话结束，恢复终端状态

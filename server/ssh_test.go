@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"os"
 	"testing"
 
 	"github.com/muesli/cancelreader"
@@ -57,5 +58,29 @@ func TestIsStdinCopyErrBenign(t *testing.T) {
 	}
 	if isStdinCopyErrBenign(errors.New("boom")) {
 		t.Fatalf("expected generic error to be non-benign")
+	}
+}
+
+func TestSSHTerm(t *testing.T) {
+	origTerm, hadTerm := os.LookupEnv("TERM")
+	if hadTerm {
+		defer os.Setenv("TERM", origTerm)
+	} else {
+		defer os.Unsetenv("TERM")
+	}
+
+	os.Setenv("TERM", "xterm-kitty")
+	if got := sshTerm(); got != "xterm-kitty" {
+		t.Fatalf("expected TERM to be forwarded, got %q", got)
+	}
+
+	os.Setenv("TERM", "dumb")
+	if got := sshTerm(); got != "xterm-256color" {
+		t.Fatalf("expected dumb TERM to fall back to xterm-256color, got %q", got)
+	}
+
+	os.Unsetenv("TERM")
+	if got := sshTerm(); got != "xterm-256color" {
+		t.Fatalf("expected empty TERM to fall back to xterm-256color, got %q", got)
 	}
 }
