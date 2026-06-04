@@ -45,11 +45,6 @@ func dialWithTrace(ctx context.Context, addr string, config *ssh.ClientConfig) (
 		Timeout: config.Timeout,
 	}
 
-	rawConn, err := dialer.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("dial TCP %s: %w", addr, err)
-	}
-
 	// --- SSH Handshake with FRP EOF retry ---
 	// FRP tunnel can be momentarily unstable during establishment, causing
 	// the banner read to return EOF. A single retry with a fresh TCP
@@ -59,56 +54,65 @@ func dialWithTrace(ctx context.Context, addr string, config *ssh.ClientConfig) (
 		sshConn ssh.Conn
 		chans   <-chan ssh.NewChannel
 		reqs    <-chan *ssh.Request
+		err     error
 	)
 
 	for attempt := 0; attempt < 2; attempt++ {
+		// Create a per-attempt context so that if the first handshake
+		// consumed most of the parent deadline, the retry still gets a
+		// reasonable window.
+		attemptCtx, attemptCancel := context.WithCancel(ctx)
+
+		// TCP dial — use a per-attempt deadline from the remaining time.
 		if attempt > 0 {
 			// Wait briefly for FRP tunnel to re-establish
 			select {
 			case <-time.After(500 * time.Millisecond):
-			case <-ctx.Done():
-				return nil, fmt.Errorf("retry cancelled: %w", ctx.Err())
+			case <-attemptCtx.Done():
+				attemptCancel()
+				return nil, fmt.Errorf("retry cancelled: %w", attemptCtx.Err())
 			}
-
-			newRaw, dialErr := dialer.DialContext(ctx, "tcp", addr)
-			if dialErr != nil {
-				return nil, fmt.Errorf("dial TCP retry %s: %w", addr, dialErr)
-			}
-			tc = newRaw
-		} else {
-			tc = rawConn
 		}
 
-		// Apply context-derived deadline
-		if deadline, ok := ctx.Deadline(); ok {
-			_ = tc.SetDeadline(deadline)
+		var dialErr error
+		tc, dialErr = dialer.DialContext(attemptCtx, "tcp", addr)
+		if dialErr != nil {
+			attemptCancel()
+			if attempt == 0 {
+				return nil, fmt.Errorf("dial TCP %s: %w", addr, dialErr)
+			}
+			return nil, fmt.Errorf("dial TCP retry %s: %w", addr, dialErr)
+		}
+
+		// Set a per-attempt deadline so the SSH handshake doesn't
+		// overrun the remaining context time.  We do NOT use a parallel
+		// goroutine to call tc.Close() — closing the connection from
+		// another goroutine while ssh.NewClientConn is reading it causes
+		// a TOCTOU race that produces a spurious EOF error, making it
+		// indistinguishable from a genuine FRP-level EOF.
+		if d, ok := attemptCtx.Deadline(); ok {
+			_ = tc.SetDeadline(d)
 		} else if config.Timeout > 0 {
 			_ = tc.SetDeadline(time.Now().Add(config.Timeout))
 		}
 
-		// Monitor context cancellation in parallel
-		ctxDone := make(chan struct{}, 1)
-		go func() {
-			select {
-			case <-ctx.Done():
-				tc.Close()
-			case <-ctxDone:
-			}
-		}()
-
 		sshConn, chans, reqs, err = ssh.NewClientConn(tc, addr, config)
-		close(ctxDone) // let goroutine exit promptly
+		attemptCancel() // release context resources (does NOT close tc)
 
 		if err != nil {
-			if attempt == 0 && strings.Contains(err.Error(), "EOF") && ctx.Err() == nil {
-				// Transient FRP EOF — retry with fresh TCP
+			tc.Close()
+
+			if attempt == 0 && strings.Contains(err.Error(), "EOF") {
+				// Transient FRP EOF — retry with fresh TCP connection
 				continue
 			}
-			tc.Close()
 			return nil, fmt.Errorf("SSH handshake %s: %w", addr, err)
 		}
 
-		break // success
+		// Success — clear deadline so that subsequent operations
+		// (session creation, shell start) are not time-restricted.
+		_ = tc.SetDeadline(time.Time{})
+		break
 	}
 
 	return ssh.NewClient(sshConn, chans, reqs), nil
@@ -179,14 +183,19 @@ func sshTerm() string {
 }
 
 func setSessionEnv(session *ssh.Session) {
-	envNames := []string{"TERM", "TERM_PROGRAM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE"}
-	for _, name := range envNames {
-		value := os.Getenv(name)
-		if strings.TrimSpace(value) == "" {
-			continue
-		}
-		_ = session.Setenv(name, value)
-	}
+	// TERM is forwarded via RequestPty's term parameter, which is the
+	// standard SSH mechanism. Setting it again via Setenv is redundant
+	// and can cause some SSH servers to close the session if they reject
+	// env requests or don't support them.
+	//
+	// Locale vars (LANG, LC_ALL, LC_CTYPE) and program-specific vars
+	// (TERM_PROGRAM, COLORTERM) are intentionally skipped because:
+	//   1. The remote server may not have those locales installed,
+	//      causing the shell to crash immediately on startup.
+	//   2. Non-standard vars can confuse remote tools.
+	//
+	// Users can set environment variables in their remote shell profile
+	// (~/.bashrc, ~/.zshrc, etc.) instead.
 }
 
 func (c *defaultClient) Login() error {
@@ -246,7 +255,9 @@ func (c *defaultClient) Login() error {
 
 	setSessionEnv(session)
 	modes := ssh.TerminalModes{
-		ssh.ECHO: 1,
+		ssh.ECHO:          1,
+		ssh.TTY_OP_ISPEED: 14400,
+		ssh.TTY_OP_OSPEED: 14400,
 	}
 	err = session.RequestPty(sshTerm(), h, w, modes)
 	if err != nil {

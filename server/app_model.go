@@ -16,6 +16,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"golang.org/x/crypto/ssh"
 )
 
 type refreshMsg struct{}
@@ -572,6 +573,14 @@ func describeConnectError(err error) string {
 	case strings.Contains(msg, "request remote pty") || strings.Contains(msg, "pty"):
 		return AM.t("Reason: remote PTY allocation failed\nCheck: whether the server allows PTY and whether the terminal type is supported\nDetail: ", "原因：远端 PTY 分配失败\n建议：检查服务器是否允许 PTY，以及终端类型是否受支持\n详情：") + detail
 	case strings.Contains(msg, "remote shell exited"):
+		// Check for ExitMissingError — server closed the session channel
+		// without sending an exit-status or exit-signal. This usually
+		// means the remote shell process never properly started or was
+		// killed immediately.
+		var exitMissingErr *ssh.ExitMissingError
+		if errors.As(err, &exitMissingErr) {
+			return AM.t("Reason: remote shell exited — no exit status received from the server\nCheck: the remote user's default shell (e.g., /etc/passwd); the shell may need to be reinstalled or reconfigured\nDetail: ", "原因：远端 shell 退出 — 未从服务器收到退出状态\n建议：检查远程用户的默认 shell（如 /etc/passwd）；可能需要重新安装或配置 shell\n详情：") + detail
+		}
 		return AM.t("Reason: remote shell exited with an error\nCheck: the command output above; remote TUI programs may need TERM and UTF-8 locale support\nDetail: ", "原因：远端 shell 异常退出\n建议：查看上方命令输出；远端 TUI 程序可能需要 TERM 和 UTF-8 locale 支持\n详情：") + detail
 	}
 
