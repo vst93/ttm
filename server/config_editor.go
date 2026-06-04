@@ -1,6 +1,8 @@
 package server
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -186,6 +188,7 @@ func (am *AppModel) openConfigEditor() tea.Cmd {
 	AM.editor = nil
 	AM.pendingDelete = nil
 	AM.pendingSync = nil
+	AM.pendingConfigExport = nil
 	return AM.configEditor.setFocus(1)
 }
 
@@ -244,6 +247,8 @@ func (am *AppModel) handleConfigEditorKey(msg tea.KeyMsg) tea.Cmd {
 			return setTip(fmt.Sprintf(am.t("copied %d chars (terminal clipboard)", "已复制 %d 个字符（终端剪贴板）"), len([]rune(value))), tipSuccess)
 		}
 		return setTip(fmt.Sprintf(am.t("copied %d chars", "已复制 %d 个字符"), len([]rune(value))), tipSuccess)
+	case "ctrl+b":
+		return am.exportConfigAsBase64()
 	case "ctrl+s":
 		return am.saveConfigEditor()
 	}
@@ -371,8 +376,8 @@ func (am *AppModel) buildConfigEditorOverlay(frameWidth, frameHeight int) string
 	bodyText := body.String()
 
 	title := am.t("Sync Config", "同步配置")
-	help := fmt.Sprintf(am.t("tab switch · ^S save · ^R reveal/hide %s · ^Y copy all · ^U clear field · esc",
-		"tab 切换 · ^S 保存 · ^R 显示/隐藏 %s · ^Y 全部复制 · ^U 清空字段 · esc"), AM.configEditor.modeHint(am))
+	help := fmt.Sprintf(am.t("tab switch · ^S save · ^R reveal/hide %s · ^Y copy field · ^B export config · ^U clear field · esc",
+		"tab 切换 · ^S 保存 · ^R 显示/隐藏 %s · ^Y 复制字段 · ^B 导出配置 · ^U 清空字段 · esc"), AM.configEditor.modeHint(am))
 	sepWidth := inputWidth + 2
 	if sepWidth > overlayWidth-2 {
 		sepWidth = overlayWidth - 2
@@ -439,4 +444,122 @@ func (am *AppModel) buildConfigEditorOverlay(frameWidth, frameHeight int) string
 		Height(containerHeight).
 		Padding(0, 0).
 		Render(AM.configEditor.viewport.View())
+}
+
+type configExportState struct {
+	importCmd string
+	copiedTo  string // "clipboard" or "terminal clipboard"
+}
+
+func (am *AppModel) exportConfigAsBase64() tea.Cmd {
+	// Use the config snapshot from when editor was opened (the saved config)
+	config := AM.configEditor.original
+
+	jsonBytes, err := json.Marshal(config)
+	if err != nil {
+		return setTip(am.t("export failed: ", "导出失败: ")+err.Error(), tipError)
+	}
+
+	encoded := base64.StdEncoding.EncodeToString(jsonBytes)
+	importCmd := "ttm --import-config " + encoded
+
+	usedOSC52Only, err := writeTextToClipboard(importCmd)
+	if err != nil {
+		return setTip(am.t("copy failed: ", "复制失败: ")+err.Error(), tipError)
+	}
+
+	copiedTo := am.t("clipboard", "剪贴板")
+	if usedOSC52Only {
+		copiedTo = am.t("terminal clipboard", "终端剪贴板")
+	}
+
+	AM.pendingConfigExport = &configExportState{
+		importCmd: importCmd,
+		copiedTo:  copiedTo,
+	}
+	return nil
+}
+
+func (am *AppModel) handleConfigExportKey(msg tea.KeyMsg) tea.Cmd {
+	if AM.pendingConfigExport == nil {
+		return nil
+	}
+	switch msg.String() {
+	case "esc", "enter", "q", "y":
+		AM.pendingConfigExport = nil
+		return nil
+	}
+	return nil
+}
+
+func (am *AppModel) buildConfigExportOverlay(frameWidth int) string {
+	if AM.pendingConfigExport == nil {
+		return ""
+	}
+	overlayWidth := (frameWidth * 4) / 5
+	if overlayWidth < 60 {
+		overlayWidth = 60
+	}
+	if overlayWidth > frameWidth {
+		overlayWidth = frameWidth
+	}
+
+	exportedTitle := am.t("Config Exported ✓", "配置已导出 ✓")
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color("78")).Bold(true).Render(exportedTitle)
+
+	sub := lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(
+		am.t("The import command has been copied to "+AM.pendingConfigExport.copiedTo+".",
+			"导入命令已复制到"+AM.pendingConfigExport.copiedTo+"。"),
+	)
+
+	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(strings.Repeat("─", overlayWidth-6))
+
+	cmdLabel := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true).Render(
+		am.t("Import Command:", "导入命令："),
+	)
+	cmdBox := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("187")).
+		Background(lipgloss.Color("236")).
+		Padding(0, 1).
+		Width(overlayWidth - 8).
+		Render(AM.pendingConfigExport.importCmd)
+
+	desc := lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(
+		am.t(
+			"Share this command with another machine, then run it there to import the same config.\nThe command contains your token — keep it secret!",
+			"将此命令分享到其他机器，运行即可导入相同配置。\n命令中包含您的 token——请勿泄露！",
+		),
+	)
+
+	warn := lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true).Render(
+		"! " + am.t("WARNING: This command contains sensitive credentials. Do not share it publicly or paste it in untrusted places.",
+			"警告：此命令包含敏感凭据。请勿公开发布或粘贴到不可信的位置。"),
+	)
+
+	help := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
+		am.t("esc/enter/q/y to dismiss", "esc/enter/q/y 关闭"),
+	)
+
+	content := lipgloss.JoinVertical(
+		lipgloss.Left,
+		title,
+		sub,
+		sep,
+		"",
+		cmdLabel,
+		cmdBox,
+		"",
+		desc,
+		"",
+		warn,
+		"",
+		help,
+	)
+
+	return lipgloss.NewStyle().
+		Width(overlayWidth).
+		Padding(1, 2).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("78")).
+		Render(content)
 }

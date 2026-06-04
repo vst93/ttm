@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -35,6 +36,83 @@ var (
 		"aes256-cbc",
 	}
 )
+
+// dialWithTrace performs a TCP dial + SSH handshake with automatic retry on
+// EOF (handles transient FRP tunnel instability). Every call creates a fresh
+// TCP + SSH connection — no reuse.
+func dialWithTrace(ctx context.Context, addr string, config *ssh.ClientConfig) (*ssh.Client, error) {
+	dialer := &net.Dialer{
+		Timeout: config.Timeout,
+	}
+
+	rawConn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("dial TCP %s: %w", addr, err)
+	}
+
+	// --- SSH Handshake with FRP EOF retry ---
+	// FRP tunnel can be momentarily unstable during establishment, causing
+	// the banner read to return EOF. A single retry with a fresh TCP
+	// connection resolves this.
+	var (
+		tc      net.Conn
+		sshConn ssh.Conn
+		chans   <-chan ssh.NewChannel
+		reqs    <-chan *ssh.Request
+	)
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			// Wait briefly for FRP tunnel to re-establish
+			select {
+			case <-time.After(500 * time.Millisecond):
+			case <-ctx.Done():
+				return nil, fmt.Errorf("retry cancelled: %w", ctx.Err())
+			}
+
+			newRaw, dialErr := dialer.DialContext(ctx, "tcp", addr)
+			if dialErr != nil {
+				return nil, fmt.Errorf("dial TCP retry %s: %w", addr, dialErr)
+			}
+			tc = newRaw
+		} else {
+			tc = rawConn
+		}
+
+		// Apply context-derived deadline
+		if deadline, ok := ctx.Deadline(); ok {
+			_ = tc.SetDeadline(deadline)
+		} else if config.Timeout > 0 {
+			_ = tc.SetDeadline(time.Now().Add(config.Timeout))
+		}
+
+		// Monitor context cancellation in parallel
+		ctxDone := make(chan struct{}, 1)
+		go func() {
+			select {
+			case <-ctx.Done():
+				tc.Close()
+			case <-ctxDone:
+			}
+		}()
+
+		sshConn, chans, reqs, err = ssh.NewClientConn(tc, addr, config)
+		close(ctxDone) // let goroutine exit promptly
+
+		if err != nil {
+			if attempt == 0 && strings.Contains(err.Error(), "EOF") && ctx.Err() == nil {
+				// Transient FRP EOF — retry with fresh TCP
+				continue
+			}
+			tc.Close()
+			return nil, fmt.Errorf("SSH handshake %s: %w", addr, err)
+		}
+
+		break // success
+	}
+
+	return ssh.NewClient(sshConn, chans, reqs), nil
+}
 
 type defaultClient struct {
 	clientConfig *ssh.ClientConfig
@@ -74,7 +152,10 @@ func (c *defaultClient) ProbeConnection(timeout time.Duration) error {
 		cfg.Timeout = timeout
 	}
 
-	client, err := ssh.Dial("tcp", net.JoinHostPort(host, port), &cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	client, err := dialWithTrace(ctx, net.JoinHostPort(host, port), &cfg)
 	if err != nil {
 		return fmt.Errorf("dial SSH server: %w", err)
 	}
@@ -113,7 +194,10 @@ func (c *defaultClient) Login() error {
 	port := strconv.Itoa(c.node.Port)
 	fmt.Printf("%s\n", fmt.Sprintf(AM.t("connecting %s@%s:%s ...", "正在连接 %s@%s:%s ..."), c.clientConfig.User, host, port))
 
-	client, err := ssh.Dial("tcp", net.JoinHostPort(host, port), c.clientConfig)
+	ctx, cancel := context.WithTimeout(context.Background(), c.clientConfig.Timeout)
+	defer cancel()
+
+	client, err := dialWithTrace(ctx, net.JoinHostPort(host, port), c.clientConfig)
 	if err != nil {
 		msg := err.Error()
 		// use terminal password retry
@@ -127,7 +211,10 @@ func (c *defaultClient) Login() error {
 					c.clientConfig.Auth = append(c.clientConfig.Auth, ssh.Password(p))
 				}
 				fmt.Println()
-				client, err = ssh.Dial("tcp", net.JoinHostPort(host, port), c.clientConfig)
+
+				ctx2, cancel2 := context.WithTimeout(context.Background(), c.clientConfig.Timeout)
+				defer cancel2()
+				client, err = dialWithTrace(ctx2, net.JoinHostPort(host, port), c.clientConfig)
 			}
 		}
 	}

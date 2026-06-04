@@ -181,30 +181,31 @@ func renderDetail(detail string, selected bool) string {
 type AppModel struct {
 	GistConfig
 	BookmarkInfo
-	list          list.Model
-	TipString     string
-	tipLevel      tipLevel
-	tipSeq        int
-	locale        locale
-	connectKey    key.Binding
-	syncKey       key.Binding
-	addKey        key.Binding
-	editKey       key.Binding
-	deleteKey     key.Binding
-	starKey       key.Binding
-	configKey     key.Binding
-	updateKey     key.Binding
-	langToggleKey key.Binding
-	editor        *bookmarkEditor
-	configEditor  *configEditor
-	pendingDelete *deleteConfirmState
-	pendingSync   *syncConfirmState
-	isConnecting  bool
-	isUpdating    bool
-	isSyncing     bool
-	enterKeyAt    time.Time
-	width         int
-	height        int
+	list                list.Model
+	TipString           string
+	tipLevel            tipLevel
+	tipSeq              int
+	locale              locale
+	connectKey          key.Binding
+	syncKey             key.Binding
+	addKey              key.Binding
+	editKey             key.Binding
+	deleteKey           key.Binding
+	starKey             key.Binding
+	configKey           key.Binding
+	updateKey           key.Binding
+	langToggleKey       key.Binding
+	editor              *bookmarkEditor
+	configEditor        *configEditor
+	pendingDelete       *deleteConfirmState
+	pendingSync         *syncConfirmState
+	pendingConfigExport *configExportState
+	isConnecting        bool
+	isUpdating          bool
+	isSyncing           bool
+	enterKeyAt          time.Time
+	width               int
+	height              int
 }
 
 var AM = AppModel{}
@@ -860,6 +861,10 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return am, tea.Quit
 		}
 
+		if AM.pendingConfigExport != nil {
+			return am, am.handleConfigExportKey(msg)
+		}
+
 		if AM.editor != nil {
 			return am, am.handleEditorKey(msg)
 		}
@@ -1148,7 +1153,7 @@ func (am *AppModel) View() string {
 	}
 	listView := compactListView(rawView, frameHeight)
 	hasTip := strings.TrimSpace(am.TipString) != ""
-	if !hasTip && !AM.isConnecting && AM.editor == nil && AM.configEditor == nil && AM.pendingDelete == nil && AM.pendingSync == nil {
+	if !hasTip && !AM.isConnecting && AM.editor == nil && AM.configEditor == nil && AM.pendingDelete == nil && AM.pendingSync == nil && AM.pendingConfigExport == nil {
 		return docStyle.Render(listView)
 	}
 
@@ -1185,7 +1190,11 @@ func (am *AppModel) View() string {
 
 	if AM.configEditor != nil {
 		view := am.buildConfigEditorOverlay(frameWidth, frameHeight)
-		if tipOverlay != "" {
+		if AM.pendingConfigExport != nil {
+			dimmed := dimBaseForOverlay(view)
+			overlayLayer := am.buildConfigExportOverlay(frameWidth)
+			view = overlayCenter(dimmed, overlayLayer)
+		} else if tipOverlay != "" {
 			view = overlayTopRight(view, tipOverlay)
 		}
 		return docStyle.Render(view)
@@ -1206,6 +1215,11 @@ func (am *AppModel) View() string {
 	if AM.pendingSync != nil {
 		dimmed := dimBaseForOverlay(view)
 		overlayLayer := am.buildSyncConfirmOverlay(frameWidth)
+		view = overlayCenter(dimmed, overlayLayer)
+	}
+	if AM.pendingConfigExport != nil {
+		dimmed := dimBaseForOverlay(view)
+		overlayLayer := am.buildConfigExportOverlay(frameWidth)
 		view = overlayCenter(dimmed, overlayLayer)
 	}
 	if tipOverlay != "" {
