@@ -17,6 +17,7 @@ Manage, sync and connect to your servers — all from the terminal.
 - **Filter & paginate** — fuzzy search across bookmarks
 - **Private key input modes** — paste key text or provide a key file path (resolved on save)
 - **Clipboard-aware copy** — `Ctrl+Y` supports system clipboard with terminal fallback where applicable
+- **Config export/import** — share config across machines via `Ctrl+B` export + `--import-config` CLI flag
 - **i18n** — English / 中文, toggle with `L`
 - **Update check** — press `u` to check for new releases
 - **Cross-platform** — macOS, Linux, Windows, Android (Termux)
@@ -103,6 +104,7 @@ curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/
 
 | Key | Action |
 |-----|--------|
+| `Ctrl+B` | Export config as one-click import command |
 | `Ctrl+S` | Save editor form |
 | `Ctrl+R` | Reveal / hide secret fields |
 | `Ctrl+Y` | Copy focused field |
@@ -115,6 +117,17 @@ curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/
 - On save, if the value looks like a path and file reading succeeds, TTM stores the file content.
 - If file reading fails (unreadable/path is directory/too large), TTM keeps the original path text and shows a clear tip.
 - Current size guard for path-loaded key files: up to `256KB`.
+
+### Config Export / Import
+
+Export your config (platform, token, gist ID, locale) as a portable import command:
+
+1. Press `c` to open the config editor
+2. Press `Ctrl+B` — the config is serialized, base64-encoded, and the import command is copied to clipboard
+3. An overlay shows the full command, instructions, and a security warning
+4. Run `ttm --import-config <base64>` on another machine to import
+   - The terminal displays the decoded config details (token masked)
+   - Confirms before writing
 
 ### Clipboard Notes (SSH / tmux / terminal)
 
@@ -187,6 +200,7 @@ make build
 - **搜索与分页** — 模糊过滤书签列表
 - **私钥输入模式** — 支持粘贴私钥文本或填写私钥文件路径（保存时解析）
 - **剪贴板感知复制** — `Ctrl+Y` 优先系统剪贴板，并在可用时回退终端通道
+- **配置导入导出** — 通过 `Ctrl+B` 导出 + `--import-config` CLI 参数跨机器共享配置
 - **双语** — English / 中文，按 `L` 切换
 - **版本检查** — 按 `u` 检查新版本
 - **跨平台** — macOS、Linux、Windows、Android (Termux)
@@ -273,6 +287,7 @@ curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/
 
 | 按键 | 功能 |
 |------|------|
+| `Ctrl+B` | 导出配置为一键导入命令 |
 | `Ctrl+S` | 保存编辑内容 |
 | `Ctrl+R` | 显示 / 隐藏敏感字段 |
 | `Ctrl+Y` | 复制当前字段 |
@@ -285,6 +300,17 @@ curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/
 - 保存时，如果输入看起来是路径且读取成功，TTM 会将文件内容写入私钥字段。
 - 如果读取失败（不可读/是目录/文件过大），TTM 会保留原路径文本并给出明确提示。
 - 当前路径读取大小限制：`256KB`。
+
+### 配置导出 / 导入
+
+将配置（平台、token、gist ID、语言）导出为可移植的导入命令：
+
+1. 按 `c` 打开配置编辑器
+2. 按 `Ctrl+B` — 配置序列化 → base64 编码，导入命令复制到剪贴板
+3. 弹窗展示完整命令、操作说明和安全警告
+4. 在其他机器运行 `ttm --import-config <base64>` 即可导入
+   - 终端展示解码后的配置详情（token 掩码显示）
+   - 写入前需确认
 
 ### 剪贴板说明（SSH / tmux / 终端）
 
