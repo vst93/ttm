@@ -1033,7 +1033,11 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !r.Available {
 			return am, setTip(am.t("already latest "+r.Latest, "已是最新版本 "+r.Latest), tipSuccess)
 		}
-		return am, setTip(fmt.Sprintf(am.t("new version %s available: brew upgrade ttm", "发现新版本 %s: brew upgrade ttm"), r.Latest), tipInfo)
+		hint := r.UpdateHint
+		if hint == "" {
+			hint = fmt.Sprintf("https://github.com/vst93/ttm/releases/tag/%s", r.Latest)
+		}
+		return am, setTip(fmt.Sprintf(am.t("new version %s available: %s", "发现新版本 %s: %s"), r.Latest, hint), tipInfo)
 	case syncUploadMsg:
 		AM.isSyncing = false
 		if msg.Err != nil {
