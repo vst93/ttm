@@ -12,10 +12,12 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/muesli/cancelreader"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/terminal"
+	"golang.org/x/term"
 )
 
 var (
@@ -245,6 +247,12 @@ func (c *defaultClient) Login() error {
 	}
 	defer terminal.Restore(fd, state)
 
+	// Read the local VERASE character before MakeRaw overrides it,
+	// so we can forward it to the remote PTY. This ensures Backspace/Delete
+	// works correctly on servers whose termios expects a different erase
+	// character than what MakeRaw sets locally (e.g. ^H vs ^?).
+	eraseChar := getLocalEraseChar(fd)
+
 	//changed fd to int(os.Stdout.Fd()) becaused terminal.GetSize(fd) doesn't work in Windows
 	//refrence: https://github.com/golang/go/issues/20388
 	w, h, err := terminal.GetSize(int(os.Stdout.Fd()))
@@ -258,6 +266,9 @@ func (c *defaultClient) Login() error {
 		ssh.ECHO:          1,
 		ssh.TTY_OP_ISPEED: 14400,
 		ssh.TTY_OP_OSPEED: 14400,
+	}
+	if eraseChar != 0 {
+		modes[ssh.VERASE] = uint32(eraseChar)
 	}
 	err = session.RequestPty(sshTerm(), h, w, modes)
 	if err != nil {
@@ -409,4 +420,42 @@ func genSSHConfig(node *SSHConfig) (*defaultClient, error) {
 		clientConfig: config,
 		node:         node,
 	}, nil
+}
+
+// getLocalEraseChar reads the current VERASE character from the local
+// terminal's termios settings. This should be called before MakeRaw
+// overrides the setting, so the value can be forwarded to the remote PTY
+// via SSH TerminalModes. Returns 0 if the value cannot be read.
+func getLocalEraseChar(fd int) byte {
+	oldState, err := term.GetState(fd)
+	if err != nil {
+		return 0
+	}
+	// Restore immediately — we only wanted to peek at the state.
+	// MakeRaw will be called right after this.
+	defer term.Restore(fd, oldState)
+
+	// Use the raw syscall to read termios so we don't depend on
+	// golang.org/x/term internals. VERASE is at index 6 in the
+	// c_cc array on Linux/macOS (POSIX).
+	var t syscall.Termios
+	if _, _, errno := syscall.Syscall6(
+		syscall.SYS_IOCTL,
+		uintptr(fd),
+		uintptr(syscall.TCGETS),
+		uintptr(unsafe.Pointer(&t)),
+		0, 0, 0,
+	); errno != 0 {
+		return 0
+	}
+	// c_cc[VERASE] is at index 6 on Linux, 4 on macOS.
+	// Use the POSIX standard: we check both common positions.
+	// Linux: VERASE = 6, macOS: VERASE = 4
+	// The safest approach: try the value that's non-zero.
+	for _, idx := range []int{6, 4} {
+		if idx < len(t.Cc) && t.Cc[idx] != 0 {
+			return byte(t.Cc[idx])
+		}
+	}
+	return 0
 }
