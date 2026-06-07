@@ -46,15 +46,21 @@ func writeTextToClipboard(text string) (bool, error) {
 }
 
 func shouldPreferOSC52() bool {
-	if runtime.GOOS == "windows" || isTermuxEnv() || !isInteractiveTerminal() {
+	if runtime.GOOS == "windows" || !isInteractiveTerminal() {
 		return false
+	}
+	if isTermuxEnv() {
+		return true
 	}
 	return os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_TTY") != "" || os.Getenv("TMUX") != ""
 }
 
 func shouldAttemptOSC52Fallback() bool {
-	if runtime.GOOS == "windows" || isTermuxEnv() || !isInteractiveTerminal() {
+	if runtime.GOOS == "windows" || !isInteractiveTerminal() {
 		return false
+	}
+	if isTermuxEnv() {
+		return true
 	}
 	return true
 }

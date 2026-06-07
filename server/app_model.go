@@ -196,17 +196,19 @@ type AppModel struct {
 	configKey           key.Binding
 	updateKey           key.Binding
 	langToggleKey       key.Binding
+	copySSHKey          key.Binding
 	editor              *bookmarkEditor
 	configEditor        *configEditor
 	pendingDelete       *deleteConfirmState
 	pendingSync         *syncConfirmState
 	pendingConfigExport *configExportState
-	isConnecting        bool
-	isUpdating          bool
-	isSyncing           bool
-	enterKeyAt          time.Time
-	width               int
-	height              int
+	pendingUpdate      *updatePromptState
+	isConnecting       bool
+	isUpdating         bool
+	isSyncing          bool
+	enterKeyAt         time.Time
+	width              int
+	height             int
 }
 
 var AM = AppModel{}
@@ -251,6 +253,10 @@ func (am *AppModel) Init() tea.Cmd {
 	am.langToggleKey = key.NewBinding(
 		key.WithKeys("L"),
 		key.WithHelp("L", "lang"),
+	)
+	am.copySSHKey = key.NewBinding(
+		key.WithKeys("y"),
+		key.WithHelp("y", "copy ssh"),
 	)
 	return func() tea.Msg { return initMsg{} }
 }
@@ -436,16 +442,16 @@ func createListWithSelection(selectedIndex int) {
 	AM.list.Styles.PaginationStyle = lipgloss.NewStyle().
 		PaddingLeft(2)
 	AM.list.Styles.HelpStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("241")).
+		Foreground(lipgloss.Color("252")).
 		Padding(0, 0, 0, 2)
 	AM.list.Styles.DividerDot = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("238")).
 		SetString(" · ")
 	AM.list.AdditionalShortHelpKeys = func() []key.Binding {
-		return []key.Binding{AM.connectKey, AM.syncKey, AM.addKey, AM.starKey, AM.configKey, AM.langToggleKey}
+		return []key.Binding{AM.connectKey, AM.syncKey, AM.addKey, AM.starKey, AM.configKey, AM.copySSHKey, AM.langToggleKey}
 	}
 	AM.list.AdditionalFullHelpKeys = func() []key.Binding {
-		return []key.Binding{AM.connectKey, AM.syncKey, AM.addKey, AM.editKey, AM.deleteKey, AM.starKey, AM.configKey, AM.updateKey, AM.langToggleKey}
+		return []key.Binding{AM.connectKey, AM.syncKey, AM.addKey, AM.editKey, AM.deleteKey, AM.starKey, AM.configKey, AM.copySSHKey, AM.updateKey, AM.langToggleKey}
 	}
 	// Re-trigger pagination calc after styles changed (padding differs from defaults)
 	AM.list.SetSize(listWidth, listHeight)
@@ -850,7 +856,6 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case initMsg:
 		AM.BookmarkInfo.Init()
-		fmt.Print("\033[?25h")
 		createList()
 		return am, nil
 	case refreshMsg:
@@ -868,6 +873,10 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.String() == "ctrl+c" {
 			return am, tea.Quit
+		}
+
+		if AM.pendingUpdate != nil {
+			return am, am.handleUpdatePromptKey(msg)
 		}
 
 		if AM.pendingConfigExport != nil {
@@ -917,6 +926,8 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return am, tea.Batch(tipCmd, func() tea.Msg {
 				return updateCheckMsg{Result: checkUpdate()}
 			})
+		} else if !isFiltering && msg.String() == "y" {
+			return am, am.copySelectedSSHCommand()
 		} else if !isFiltering && (msg.String() == "s" || msg.String() == "S") {
 			requireGistID := msg.String() == "S"
 			if tip := am.checkSyncConfig(requireGistID); tip != nil {
@@ -1033,7 +1044,19 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !r.Available {
 			return am, setTip(am.t("already latest "+r.Latest, "已是最新版本 "+r.Latest), tipSuccess)
 		}
-		return am, setTip(fmt.Sprintf(am.t("new version %s available: brew upgrade ttm", "发现新版本 %s: brew upgrade ttm"), r.Latest), tipInfo)
+		// Show interactive update prompt.
+		AM.pendingUpdate = &updatePromptState{
+			Result:   r,
+			selected: 0,
+			dlStatus: dlModelSelect,
+		}
+		return am, nil
+	case updateBrewResultMsg:
+		// Brew upgrade completed; overlay already reflects status.
+		return am, nil
+	case updateDownloadResultMsg:
+		// Download/replace completed; overlay already reflects status.
+		return am, nil
 	case syncUploadMsg:
 		AM.isSyncing = false
 		if msg.Err != nil {
@@ -1150,6 +1173,253 @@ func compactListView(s string, totalHeight int) string {
 	return strings.Join(result, "\n")
 }
 
+// handleUpdatePromptKey handles key presses in the update confirmation overlay.
+func (am *AppModel) handleUpdatePromptKey(msg tea.KeyMsg) tea.Cmd {
+	if AM.pendingUpdate == nil {
+		return nil
+	}
+
+	s := AM.pendingUpdate
+
+	// If download is in progress, only allow cancel.
+	if s.dlStatus == dlModelDownloading {
+		switch msg.String() {
+		case "esc", "ctrl+c":
+			s.dlStatus = dlModelCancelled
+			return setTip(am.t("update cancelled", "已取消更新"), tipInfo)
+		}
+		return nil
+	}
+
+	if s.dlStatus == dlModelDone || s.dlStatus == dlModelFailed || s.dlStatus == dlModelCancelled {
+		switch msg.String() {
+		case "esc", "enter", "q":
+			AM.pendingUpdate = nil
+			return nil
+		}
+		return nil
+	}
+
+	// dlModelSelect — user is choosing action.
+	switch msg.String() {
+	case "esc", "n", "q":
+		AM.pendingUpdate = nil
+		return nil
+	case "left", "h", "right", "l", "tab":
+		s.selected = 1 - s.selected
+		return nil
+	case "enter", "y":
+		if s.selected == 1 {
+			// Cancel
+			AM.pendingUpdate = nil
+			return nil
+		}
+		// Confirm update — start the update process.
+		return am.startUpdate()
+	}
+	return nil
+}
+
+// startUpdate begins the actual update process based on install method.
+// Returns a tea.Cmd that will produce a tip message with the result.
+func (am *AppModel) startUpdate() tea.Cmd {
+	s := AM.pendingUpdate
+	if s == nil {
+		return nil
+	}
+
+	r := s.Result
+
+	switch r.Method {
+	case installMethodBrew:
+		s.dlStatus = dlModelDownloading
+		return func() tea.Msg {
+			ok, output := brewUpgrade()
+			if ok {
+				s.dlStatus = dlModelDone
+				return updateBrewResultMsg{Success: true, Output: output}
+			}
+			s.dlStatus = dlModelFailed
+			s.dlError = output
+			return updateBrewResultMsg{Success: false, Output: output}
+		}
+
+	default:
+		if r.DownloadURL == "" {
+			s.dlStatus = dlModelFailed
+			s.dlError = am.t("no download for this platform", "此平台无可用下载")
+			return nil
+		}
+		s.dlStatus = dlModelDownloading
+		s.dlProgress = 0
+		return func() tea.Msg {
+			ok, msg := performUpdate(r.DownloadURL, r.Latest, func(p float64) {
+				s.dlProgress = p
+			})
+			if ok {
+				s.dlStatus = dlModelDone
+				return updateDownloadResultMsg{Success: true, Output: msg}
+			}
+			s.dlStatus = dlModelFailed
+			s.dlError = msg
+			return updateDownloadResultMsg{Success: false, Output: msg}
+		}
+	}
+}
+
+// buildUpdatePromptOverlay renders the update confirmation dialog.
+func (am *AppModel) buildUpdatePromptOverlay(frameWidth int) string {
+	if AM.pendingUpdate == nil {
+		return ""
+	}
+
+	s := AM.pendingUpdate
+	r := s.Result
+
+	overlayWidth := frameWidth * 3 / 4
+	if overlayWidth < 50 {
+		overlayWidth = 50
+	}
+	if overlayWidth > frameWidth-4 {
+		overlayWidth = frameWidth - 4
+	}
+
+	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(strings.Repeat("─", overlayWidth-6))
+	warnIcon := lipgloss.NewStyle().Foreground(lipgloss.Color("78")).Bold(true).Render("⬆")
+
+	// Title
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true).Render(
+		am.t("Update Available", "发现新版本"),
+	)
+
+	// Version info
+	curVer := r.Current
+	if curVer == "dev" || curVer == "" {
+		curVer = "(dev)"
+	}
+	verInfo := lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(
+		fmt.Sprintf("  %s → %s", curVer, r.Latest),
+	)
+
+	// Action description based on install method
+	var actionDesc string
+	switch r.Method {
+	case installMethodBrew:
+		actionDesc = am.t("Upgrade via Homebrew", "通过 Homebrew 升级")
+	case installMethodScript:
+		actionDesc = am.t("Re-run install script to update", "重新运行安装脚本更新")
+	case installMethodSource:
+		actionDesc = am.t("Download and replace binary", "下载并替换二进制文件")
+	default:
+		actionDesc = am.t("Download from release page", "从 Release 页面下载")
+	}
+
+	downloadInfo := ""
+	if r.Method == installMethodSource || r.Method == installMethodScript {
+		assetName := assetNameForPlatform()
+		if r.DownloadURL != "" {
+			downloadInfo = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(
+				fmt.Sprintf("  %s", assetName),
+			)
+		} else {
+			downloadInfo = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render(
+				am.t("  (no download for this platform)", "（此平台无可用下载）"),
+			)
+		}
+	}
+
+	// Download status
+	statusLine := ""
+	switch s.dlStatus {
+	case dlModelDownloading:
+		pct := int(s.dlProgress * 100)
+		barWidth := 20
+		filled := int(s.dlProgress * float64(barWidth))
+		if filled > barWidth {
+			filled = barWidth
+		}
+		bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Render(
+			fmt.Sprintf("  ⟳ %s %3d%%", bar, pct),
+		)
+	case dlModelDone:
+		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("78")).Render(
+			"  ✓ " + am.t("Update complete! Restart ttm to use the new version.", "更新完成！请重启 ttm 以使用新版本。"),
+		)
+	case dlModelFailed:
+		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render(
+			"  ✗ " + s.dlError,
+		)
+	case dlModelCancelled:
+		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(
+			am.t("  Cancelled.", "  已取消。"),
+		)
+	}
+
+	// Action buttons (only show when in select state)
+	buttons := ""
+	if s.dlStatus == dlModelSelect {
+		yesLabel := " " + am.t("Update", "更新") + " "
+		noLabel := " " + am.t("Later", "稍后") + " "
+
+		yesStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("16")).Background(lipgloss.Color("78")).Bold(true)
+		noStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+
+		if s.selected == 1 {
+			yesStyle = yesStyle.Background(lipgloss.Color("240")).Foreground(lipgloss.Color("252")).Bold(false)
+			noStyle = noStyle.Foreground(lipgloss.Color("16")).Background(lipgloss.Color("220")).Bold(true)
+		}
+
+		buttons = "  " + yesStyle.Render(yesLabel) + "   " + noStyle.Render(noLabel)
+	}
+
+	help := ""
+	switch s.dlStatus {
+	case dlModelSelect:
+		help = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
+			am.t("← → switch · enter confirm · esc cancel", "← → 切换 · enter 确认 · esc 取消"),
+		)
+	case dlModelDownloading:
+		help = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
+			am.t("esc to cancel", "esc 取消"),
+		)
+	case dlModelDone, dlModelFailed, dlModelCancelled:
+		help = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
+			am.t("esc/enter to close", "esc/enter 关闭"),
+		)
+	}
+
+	sections := []string{
+		warnIcon + " " + title,
+		"",
+		verInfo,
+		"",
+		sep,
+		"  " + actionDesc,
+	}
+	if downloadInfo != "" {
+		sections = append(sections, downloadInfo)
+	}
+	if statusLine != "" {
+		sections = append(sections, "", statusLine)
+	}
+	if buttons != "" {
+		sections = append(sections, "", buttons)
+	}
+	if help != "" {
+		sections = append(sections, "", help)
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left, sections...)
+
+	return lipgloss.NewStyle().
+		Width(overlayWidth).
+		Padding(1, 2).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("75")).
+		Render(content)
+}
+
 func (am *AppModel) View() string {
 	am.applyListLocale()
 	frameWidth, frameHeight := getListSize(AM.width, AM.height)
@@ -1162,7 +1432,7 @@ func (am *AppModel) View() string {
 	}
 	listView := compactListView(rawView, frameHeight)
 	hasTip := strings.TrimSpace(am.TipString) != ""
-	if !hasTip && !AM.isConnecting && AM.editor == nil && AM.configEditor == nil && AM.pendingDelete == nil && AM.pendingSync == nil && AM.pendingConfigExport == nil {
+	if !hasTip && !AM.isConnecting && AM.editor == nil && AM.configEditor == nil && AM.pendingDelete == nil && AM.pendingSync == nil && AM.pendingConfigExport == nil && AM.pendingUpdate == nil {
 		return docStyle.Render(listView)
 	}
 
@@ -1231,8 +1501,46 @@ func (am *AppModel) View() string {
 		overlayLayer := am.buildConfigExportOverlay(frameWidth)
 		view = overlayCenter(dimmed, overlayLayer)
 	}
+	if AM.pendingUpdate != nil {
+		dimmed := dimBaseForOverlay(view)
+		overlayLayer := am.buildUpdatePromptOverlay(frameWidth)
+		view = overlayCenter(dimmed, overlayLayer)
+	}
 	if tipOverlay != "" {
 		view = overlayTopRight(view, tipOverlay)
 	}
 	return docStyle.Render(view)
+}
+
+// copySelectedSSHCommand builds the ssh command for the selected bookmark,
+// copies it to clipboard (with Termux OSC52 fallback), and returns a tip
+// showing the command so the user can manually select and copy it too.
+func (am *AppModel) copySelectedSSHCommand() tea.Cmd {
+	idx := AM.list.GlobalIndex()
+	if idx < 0 || idx >= len(AM.BookmarkInfo.List) {
+		return setTip(am.t("no bookmark selected", "未选中任何书签"), tipError)
+	}
+	bm := AM.BookmarkInfo.List[idx]
+	host := bm.Host
+	if host == "" {
+		return setTip(am.t("bookmark has no host", "该书签没有主机地址"), tipError)
+	}
+	user := bm.Username
+	if user == "" {
+		user = "root"
+	}
+	port := bm.Port
+	if port <= 0 {
+		port = 22
+	}
+	cmd := fmt.Sprintf("ssh %s@%s -p %d", user, host, port)
+	usedOSC52Only, err := writeTextToClipboard(cmd)
+	if err != nil {
+		return setTip(am.t("copy failed: ", "复制失败: ")+err.Error(), tipError)
+	}
+	label := am.t("copied", "已复制")
+	if usedOSC52Only {
+		label = am.t("copied (terminal clipboard)", "已复制（终端剪贴板）")
+	}
+	return setTip(fmt.Sprintf("%s: %s", label, cmd), tipSuccess)
 }

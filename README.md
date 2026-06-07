@@ -41,8 +41,9 @@ Manage, sync and connect to your servers — all from the terminal.
 - **Clipboard-aware copy** — `Ctrl+Y` supports system clipboard with terminal fallback
 - **Config export/import** — share config across machines via `Ctrl+B` export + `--import-config`
 - **i18n** — English / 中文, toggle with `L`
-- **Update check** — press `u` to check for new releases
+- **Update check** — press `u` to check for new releases, with download progress bar
 - **Cross-platform** — macOS, Linux, Windows, Android (Termux)
+- **Copy SSH command** — press `y` to copy the standard SSH command for the selected bookmark (e.g. `ssh user@host -p 22`), with Termux OSC52 fallback; the command is shown in the tip bar for manual copy too
 
 ### Installation
 
@@ -129,9 +130,10 @@ Config directory: `~/.config/ttm/` (Linux), `~/Library/Application Support/ttm/`
 | `e` | Edit bookmark | `d` | Delete bookmark |
 | `*` | Star / unstar | `s` / `S` | Push / Pull Gist |
 | `c` | Config editor | `u` | Check updates |
-| `L` | Toggle EN / 中文 | `/` | Filter |
-| `j` / `k` `↑` / `↓` | Navigate | `h` / `l` `←` / `→` | Page |
-| `?` | Help | `q` | Quit |
+| `y` | Copy SSH command | `L` | Toggle EN / 中文 |
+| `/` | Filter | `j` / `k` `↑` / `↓` | Navigate |
+| `h` / `l` `←` / `→` | Page | `?` | Help |
+| `q` | Quit | | |
 
 **Editor shortcuts:** `Ctrl+S` save, `Ctrl+R` reveal/hide secrets, `Ctrl+Y` copy field, `Ctrl+U` clear field, `Ctrl+V` paste, `Ctrl+B` export config.
 
@@ -163,8 +165,9 @@ Config directory: `~/.config/ttm/` (Linux), `~/Library/Application Support/ttm/`
 - **剪贴板感知复制** — `Ctrl+Y` 优先系统剪贴板，可用时回退终端通道
 - **配置导入导出** — 通过 `Ctrl+B` 导出 + `--import-config` 跨机器共享配置
 - **双语** — English / 中文，按 `L` 切换
-- **版本检查** — 按 `u` 检查新版本
+- **版本检查** — 按 `u` 检查新版本，下载时显示进度条
 - **跨平台** — macOS、Linux、Windows、Android (Termux)
+- **复制 SSH 命令** — 按 `y` 复制选中书签的标准 SSH 命令（如 `ssh user@host -p 22`），兼容 Termux OSC52；命令同时显示在提示栏，支持手动选中复制
 
 ### 安装
 
@@ -251,9 +254,10 @@ ttm
 | `e` | 编辑书签 | `d` | 删除书签 |
 | `*` | 标星 / 取消 | `s` / `S` | 推送 / 拉取 Gist |
 | `c` | 配置编辑器 | `u` | 检查更新 |
-| `L` | 切换 EN / 中文 | `/` | 过滤 |
-| `j` / `k` `↑` / `↓` | 导航 | `h` / `l` `←` / `→` | 翻页 |
-| `?` | 帮助 | `q` | 退出 |
+| `y` | 复制 SSH 命令 | `L` | 切换 EN / 中文 |
+| `/` | 过滤 | `j` / `k` `↑` / `↓` | 导航 |
+| `h` / `l` `←` / `→` | 翻页 | `?` | 帮助 |
+| `q` | 退出 | | |
 
 **编辑器快捷键：** `Ctrl+S` 保存、`Ctrl+R` 显示/隐藏敏感字段、`Ctrl+Y` 复制字段、`Ctrl+U` 清空字段、`Ctrl+V` 粘贴、`Ctrl+B` 导出配置。
 

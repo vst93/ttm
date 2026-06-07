@@ -245,6 +245,12 @@ func (c *defaultClient) Login() error {
 	}
 	defer terminal.Restore(fd, state)
 
+	// Read the local VERASE character before MakeRaw overrides it,
+	// so we can forward it to the remote PTY. This ensures Backspace/Delete
+	// works correctly on servers whose termios expects a different erase
+	// character than what MakeRaw sets locally (e.g. ^H vs ^?).
+	eraseChar := getLocalEraseChar(fd)
+
 	//changed fd to int(os.Stdout.Fd()) becaused terminal.GetSize(fd) doesn't work in Windows
 	//refrence: https://github.com/golang/go/issues/20388
 	w, h, err := terminal.GetSize(int(os.Stdout.Fd()))
@@ -258,6 +264,9 @@ func (c *defaultClient) Login() error {
 		ssh.ECHO:          1,
 		ssh.TTY_OP_ISPEED: 14400,
 		ssh.TTY_OP_OSPEED: 14400,
+	}
+	if eraseChar != 0 {
+		modes[ssh.VERASE] = uint32(eraseChar)
 	}
 	err = session.RequestPty(sshTerm(), h, w, modes)
 	if err != nil {
@@ -410,3 +419,5 @@ func genSSHConfig(node *SSHConfig) (*defaultClient, error) {
 		node:         node,
 	}, nil
 }
+
+
