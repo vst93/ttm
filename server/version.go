@@ -1,8 +1,10 @@
 package server
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -16,6 +18,10 @@ var Version = "dev"
 
 type githubRelease struct {
 	TagName string `json:"tag_name"`
+	Assets  []struct {
+		Name               string `json:"name"`
+		BrowserDownloadURL string `json:"browser_download_url"`
+	} `json:"assets"`
 }
 
 type updateCheckResult struct {
@@ -24,11 +30,23 @@ type updateCheckResult struct {
 	Current     string
 	Err         error
 	Unreachable bool
-	UpdateHint  string
+	InstallHint string // short hint for the tip bar
+	DownloadURL string // direct download URL for current platform
+	Method      installMethod
 }
 
 type updateCheckMsg struct {
 	Result updateCheckResult
+}
+
+type updateBrewResultMsg struct {
+	Success bool
+	Output  string
+}
+
+type updateDownloadResultMsg struct {
+	Success bool
+	Output  string
 }
 
 type installMethod int
@@ -39,6 +57,25 @@ const (
 	installMethodScript
 	installMethodSource
 )
+
+type dlModel int
+
+const (
+	dlModelSelect dlModel = iota
+	dlModelDownloading
+	dlModelDone
+	dlModelFailed
+	dlModelCancelled
+)
+
+// updatePromptState holds the interactive update confirmation state.
+type updatePromptState struct {
+	Result    updateCheckResult
+	confirmed bool
+	selected  int // 0 = default action, 1 = cancel
+	dlStatus  dlModel
+	dlError   string
+}
 
 func detectInstallMethod() installMethod {
 	exe, err := os.Executable()
@@ -51,11 +88,10 @@ func detectInstallMethod() installMethod {
 	}
 	exe = strings.ToLower(exe)
 
-	// Homebrew prefix detection
 	brewPrefixes := []string{
-		"/usr/local/Cellar",              // macOS Intel
-		"/opt/homebrew/Cellar",           // macOS ARM
-		"/home/linuxbrew/.linuxbrew/Cellar", // Linuxbrew
+		"/usr/local/Cellar",
+		"/opt/homebrew/Cellar",
+		"/home/linuxbrew/.linuxbrew/Cellar",
 		"/linuxbrew/.linuxbrew/Cellar",
 	}
 	for _, prefix := range brewPrefixes {
@@ -64,16 +100,11 @@ func detectInstallMethod() installMethod {
 		}
 	}
 
-	// Check if running from a go install / source build location
 	if strings.Contains(exe, "/go/bin/") || strings.Contains(exe, "go-build") {
 		return installMethodSource
 	}
 
-	// Common script install locations
-	scriptDirs := []string{
-		".local/bin",
-		"bin",
-	}
+	scriptDirs := []string{".local/bin", "bin"}
 	home, _ := os.UserHomeDir()
 	for _, dir := range scriptDirs {
 		if strings.HasPrefix(exe, filepath.Join(home, dir)) {
@@ -84,17 +115,27 @@ func detectInstallMethod() installMethod {
 	return installMethodSource
 }
 
-func updateHint(method installMethod, latest string) string {
+// assetNameForPlatform returns the expected release asset name for the
+// current OS and architecture (e.g. "ttm-linux-amd64.zip").
+func assetNameForPlatform() string {
+	goos := runtime.GOOS
+	arch := runtime.GOARCH
+	if arch == "amd64" {
+		arch = "amd64"
+	} else if arch == "arm64" {
+		arch = "arm64"
+	}
+	return fmt.Sprintf("ttm-%s-%s.zip", goos, arch)
+}
+
+func hintForMethod(method installMethod, latest string) string {
 	switch method {
 	case installMethodBrew:
-		return fmt.Sprintf("brew upgrade ttm  (or: brew update && brew upgrade ttm)")
+		return "brew upgrade ttm"
 	case installMethodScript:
-		return fmt.Sprintf("curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && bash install.sh")
+		return "re-run install script"
 	case installMethodSource:
-		if runtime.GOOS == "windows" {
-			return fmt.Sprintf("Download from: https://github.com/vst93/ttm/releases/tag/%s", latest)
-		}
-		return fmt.Sprintf("go install github.com/vst93/ttm@%s   (or download from https://github.com/vst93/ttm/releases)", latest)
+		return "download & replace binary"
 	default:
 		return fmt.Sprintf("https://github.com/vst93/ttm/releases/tag/%s", latest)
 	}
@@ -133,21 +174,171 @@ func checkUpdate() updateCheckResult {
 	}
 
 	latest := release.TagName
+	method := detectInstallMethod()
 	result := updateCheckResult{
-		Current: Version,
-		Latest:  latest,
+		Current:     Version,
+		Latest:      latest,
+		Method:      method,
+		InstallHint: hintForMethod(method, latest),
 	}
+
+	// Find the download URL for the current platform.
+	wantAsset := assetNameForPlatform()
+	for _, a := range release.Assets {
+		if a.Name == wantAsset {
+			result.DownloadURL = a.BrowserDownloadURL
+			break
+		}
+	}
+
 	if !isNewer(Version, latest) {
 		result.Available = false
 		return result
 	}
 	result.Available = true
-	result.UpdateHint = updateHint(detectInstallMethod(), latest)
 	return result
+}
+
+// performUpdate downloads the release zip for the current platform,
+// extracts it, and replaces the running binary.
+// Returns (success, message).
+func performUpdate(downloadURL, latest string) (bool, string) {
+	if downloadURL == "" {
+		return false, "no download URL for this platform"
+	}
+
+	exePath, err := os.Executable()
+	if err != nil {
+		return false, fmt.Sprintf("cannot locate binary: %v", err)
+	}
+	exePath, _ = filepath.EvalSymlinks(exePath)
+
+	// Download to a temp file.
+	tmpDir := os.TempDir()
+	zipPath := filepath.Join(tmpDir, fmt.Sprintf("ttm-%s.zip", latest))
+
+	out, err := os.Create(zipPath)
+	if err != nil {
+		return false, fmt.Sprintf("cannot create temp file: %v", err)
+	}
+
+	httpClient := &http.Client{Timeout: 60 * time.Second}
+	resp, err := httpClient.Get(downloadURL)
+	if err != nil {
+		out.Close()
+		os.Remove(zipPath)
+		return false, fmt.Sprintf("download failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		out.Close()
+		os.Remove(zipPath)
+		return false, fmt.Sprintf("download returned %d", resp.StatusCode)
+	}
+
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		out.Close()
+		os.Remove(zipPath)
+		return false, fmt.Sprintf("download interrupted: %v", err)
+	}
+	out.Close()
+
+	// Extract the zip.
+	reader, err := zip.OpenReader(zipPath)
+	os.Remove(zipPath)
+	if err != nil {
+		return false, fmt.Sprintf("cannot open zip: %v", err)
+	}
+	defer reader.Close()
+
+	var extractedPath string
+	for _, f := range reader.File {
+		if strings.HasPrefix(f.Name, ".") {
+			continue
+		}
+		info := f.FileInfo()
+		if info.IsDir() {
+			continue
+		}
+		// We expect a single file named "ttm" (or "ttm.exe").
+		rc, err := f.Open()
+		if err != nil {
+			return false, fmt.Sprintf("cannot extract: %v", err)
+		}
+		extractedPath = filepath.Join(tmpDir, f.Name)
+		extracted, err := os.OpenFile(extractedPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+		if err != nil {
+			rc.Close()
+			return false, fmt.Sprintf("cannot write temp binary: %v", err)
+		}
+		_, err = io.Copy(extracted, rc)
+		extracted.Close()
+		rc.Close()
+		if err != nil {
+			os.Remove(extractedPath)
+			return false, fmt.Sprintf("extraction interrupted: %v", err)
+		}
+		break // only need the first (and likely only) file
+	}
+
+	if extractedPath == "" {
+		return false, "no binary found in archive"
+	}
+
+	// Replace the running binary.
+	// On Unix we can overwrite an executing binary; on we rename the old one first.
+	oldPath := exePath + ".old"
+	_ = os.Remove(oldPath)
+
+	// Attempt a direct rename-based swap:
+	//   ttm.current -> ttm.old
+	//   ttm.new     -> ttm.current
+	if err := os.Rename(exePath, oldPath); err != nil {
+		// Fallback: try direct copy if rename fails (e.g. permissions).
+		if err := copyFile(extractedPath, exePath); err != nil {
+			os.Remove(extractedPath)
+			return false, fmt.Sprintf("cannot replace binary: %v", err)
+		}
+	} else {
+		if err := os.Rename(extractedPath, exePath); err != nil {
+			// Rollback.
+			os.Rename(oldPath, exePath)
+			return false, fmt.Sprintf("cannot install new binary: %v", err)
+		}
+		_ = os.Remove(oldPath)
+	}
+
+	return true, "restart ttm to use the new version"
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
 }
 
 // execCommandExists checks if a command exists in PATH.
 func execCommandExists(name string) bool {
 	_, err := exec.LookPath(name)
 	return err == nil
+}
+
+// brewUpgrade runs "brew upgrade ttm" and returns (success, outputOrError).
+func brewUpgrade() (bool, string) {
+	cmd := exec.Command("brew", "upgrade", "ttm")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Sprintf("brew upgrade failed: %s", strings.TrimSpace(string(out)))
+	}
+	return true, strings.TrimSpace(string(out))
 }

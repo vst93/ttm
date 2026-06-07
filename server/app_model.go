@@ -201,12 +201,13 @@ type AppModel struct {
 	pendingDelete       *deleteConfirmState
 	pendingSync         *syncConfirmState
 	pendingConfigExport *configExportState
-	isConnecting        bool
-	isUpdating          bool
-	isSyncing           bool
-	enterKeyAt          time.Time
-	width               int
-	height              int
+	pendingUpdate      *updatePromptState
+	isConnecting       bool
+	isUpdating         bool
+	isSyncing          bool
+	enterKeyAt         time.Time
+	width              int
+	height             int
 }
 
 var AM = AppModel{}
@@ -870,6 +871,10 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return am, tea.Quit
 		}
 
+		if AM.pendingUpdate != nil {
+			return am, am.handleUpdatePromptKey(msg)
+		}
+
 		if AM.pendingConfigExport != nil {
 			return am, am.handleConfigExportKey(msg)
 		}
@@ -1033,11 +1038,19 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !r.Available {
 			return am, setTip(am.t("already latest "+r.Latest, "已是最新版本 "+r.Latest), tipSuccess)
 		}
-		hint := r.UpdateHint
-		if hint == "" {
-			hint = fmt.Sprintf("https://github.com/vst93/ttm/releases/tag/%s", r.Latest)
+		// Show interactive update prompt.
+		AM.pendingUpdate = &updatePromptState{
+			Result:   r,
+			selected: 0,
+			dlStatus: dlModelSelect,
 		}
-		return am, setTip(fmt.Sprintf(am.t("new version %s available: %s", "发现新版本 %s: %s"), r.Latest, hint), tipInfo)
+		return am, nil
+	case updateBrewResultMsg:
+		// Brew upgrade completed; overlay already reflects status.
+		return am, nil
+	case updateDownloadResultMsg:
+		// Download/replace completed; overlay already reflects status.
+		return am, nil
 	case syncUploadMsg:
 		AM.isSyncing = false
 		if msg.Err != nil {
@@ -1154,6 +1167,243 @@ func compactListView(s string, totalHeight int) string {
 	return strings.Join(result, "\n")
 }
 
+// handleUpdatePromptKey handles key presses in the update confirmation overlay.
+func (am *AppModel) handleUpdatePromptKey(msg tea.KeyMsg) tea.Cmd {
+	if AM.pendingUpdate == nil {
+		return nil
+	}
+
+	s := AM.pendingUpdate
+
+	// If download is in progress, only allow cancel.
+	if s.dlStatus == dlModelDownloading {
+		switch msg.String() {
+		case "esc", "ctrl+c":
+			s.dlStatus = dlModelCancelled
+			return setTip(am.t("update cancelled", "已取消更新"), tipInfo)
+		}
+		return nil
+	}
+
+	if s.dlStatus == dlModelDone || s.dlStatus == dlModelFailed || s.dlStatus == dlModelCancelled {
+		switch msg.String() {
+		case "esc", "enter", "q":
+			AM.pendingUpdate = nil
+			return nil
+		}
+		return nil
+	}
+
+	// dlModelSelect — user is choosing action.
+	switch msg.String() {
+	case "esc", "n", "q":
+		AM.pendingUpdate = nil
+		return nil
+	case "left", "h", "right", "l", "tab":
+		s.selected = 1 - s.selected
+		return nil
+	case "enter", "y":
+		if s.selected == 1 {
+			// Cancel
+			AM.pendingUpdate = nil
+			return nil
+		}
+		// Confirm update — start the update process.
+		return am.startUpdate()
+	}
+	return nil
+}
+
+// startUpdate begins the actual update process based on install method.
+// Returns a tea.Cmd that will produce a tip message with the result.
+func (am *AppModel) startUpdate() tea.Cmd {
+	s := AM.pendingUpdate
+	if s == nil {
+		return nil
+	}
+
+	r := s.Result
+
+	switch r.Method {
+	case installMethodBrew:
+		s.dlStatus = dlModelDownloading
+		return func() tea.Msg {
+			ok, output := brewUpgrade()
+			if ok {
+				s.dlStatus = dlModelDone
+				return updateBrewResultMsg{Success: true, Output: output}
+			}
+			s.dlStatus = dlModelFailed
+			s.dlError = output
+			return updateBrewResultMsg{Success: false, Output: output}
+		}
+
+	default:
+		if r.DownloadURL == "" {
+			s.dlStatus = dlModelFailed
+			s.dlError = am.t("no download for this platform", "此平台无可用下载")
+			return nil
+		}
+		s.dlStatus = dlModelDownloading
+		return func() tea.Msg {
+			ok, msg := performUpdate(r.DownloadURL, r.Latest)
+			if ok {
+				s.dlStatus = dlModelDone
+				return updateDownloadResultMsg{Success: true, Output: msg}
+			}
+			s.dlStatus = dlModelFailed
+			s.dlError = msg
+			return updateDownloadResultMsg{Success: false, Output: msg}
+		}
+	}
+}
+
+// buildUpdatePromptOverlay renders the update confirmation dialog.
+func (am *AppModel) buildUpdatePromptOverlay(frameWidth int) string {
+	if AM.pendingUpdate == nil {
+		return ""
+	}
+
+	s := AM.pendingUpdate
+	r := s.Result
+
+	overlayWidth := frameWidth * 3 / 4
+	if overlayWidth < 50 {
+		overlayWidth = 50
+	}
+	if overlayWidth > frameWidth-4 {
+		overlayWidth = frameWidth - 4
+	}
+
+	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(strings.Repeat("─", overlayWidth-6))
+	warnIcon := lipgloss.NewStyle().Foreground(lipgloss.Color("78")).Bold(true).Render("⬆")
+
+	// Title
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true).Render(
+		am.t("Update Available", "发现新版本"),
+	)
+
+	// Version info
+	curVer := r.Current
+	if curVer == "dev" || curVer == "" {
+		curVer = "(dev)"
+	}
+	verInfo := lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(
+		fmt.Sprintf("  %s → %s", curVer, r.Latest),
+	)
+
+	// Action description based on install method
+	var actionDesc string
+	switch r.Method {
+	case installMethodBrew:
+		actionDesc = am.t("Upgrade via Homebrew", "通过 Homebrew 升级")
+	case installMethodScript:
+		actionDesc = am.t("Re-run install script to update", "重新运行安装脚本更新")
+	case installMethodSource:
+		actionDesc = am.t("Download and replace binary", "下载并替换二进制文件")
+	default:
+		actionDesc = am.t("Download from release page", "从 Release 页面下载")
+	}
+
+	downloadInfo := ""
+	if r.Method == installMethodSource || r.Method == installMethodScript {
+		assetName := assetNameForPlatform()
+		if r.DownloadURL != "" {
+			downloadInfo = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(
+				fmt.Sprintf("  %s", assetName),
+			)
+		} else {
+			downloadInfo = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render(
+				am.t("  (no download for this platform)", "（此平台无可用下载）"),
+			)
+		}
+	}
+
+	// Download status
+	statusLine := ""
+	switch s.dlStatus {
+	case dlModelDownloading:
+		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Render(
+			am.t("  ⟳ Updating...", "  ⟳ 正在更新..."),
+		)
+	case dlModelDone:
+		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("78")).Render(
+			"  ✓ " + am.t("Update complete! Restart ttm to use the new version.", "更新完成！请重启 ttm 以使用新版本。"),
+		)
+	case dlModelFailed:
+		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render(
+			"  ✗ " + s.dlError,
+		)
+	case dlModelCancelled:
+		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(
+			am.t("  Cancelled.", "  已取消。"),
+		)
+	}
+
+	// Action buttons (only show when in select state)
+	buttons := ""
+	if s.dlStatus == dlModelSelect {
+		yesLabel := " " + am.t("Update", "更新") + " "
+		noLabel := " " + am.t("Later", "稍后") + " "
+
+		yesStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("16")).Background(lipgloss.Color("78")).Bold(true)
+		noStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+
+		if s.selected == 1 {
+			yesStyle = yesStyle.Background(lipgloss.Color("240")).Foreground(lipgloss.Color("252")).Bold(false)
+			noStyle = noStyle.Foreground(lipgloss.Color("16")).Background(lipgloss.Color("220")).Bold(true)
+		}
+
+		buttons = "  " + yesStyle.Render(yesLabel) + "   " + noStyle.Render(noLabel)
+	}
+
+	help := ""
+	switch s.dlStatus {
+	case dlModelSelect:
+		help = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
+			am.t("← → switch · enter confirm · esc cancel", "← → 切换 · enter 确认 · esc 取消"),
+		)
+	case dlModelDownloading:
+		help = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
+			am.t("esc to cancel", "esc 取消"),
+		)
+	case dlModelDone, dlModelFailed, dlModelCancelled:
+		help = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
+			am.t("esc/enter to close", "esc/enter 关闭"),
+		)
+	}
+
+	sections := []string{
+		warnIcon + " " + title,
+		"",
+		verInfo,
+		"",
+		sep,
+		"  " + actionDesc,
+	}
+	if downloadInfo != "" {
+		sections = append(sections, downloadInfo)
+	}
+	if statusLine != "" {
+		sections = append(sections, "", statusLine)
+	}
+	if buttons != "" {
+		sections = append(sections, "", buttons)
+	}
+	if help != "" {
+		sections = append(sections, "", help)
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left, sections...)
+
+	return lipgloss.NewStyle().
+		Width(overlayWidth).
+		Padding(1, 2).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("75")).
+		Render(content)
+}
+
 func (am *AppModel) View() string {
 	am.applyListLocale()
 	frameWidth, frameHeight := getListSize(AM.width, AM.height)
@@ -1166,7 +1416,7 @@ func (am *AppModel) View() string {
 	}
 	listView := compactListView(rawView, frameHeight)
 	hasTip := strings.TrimSpace(am.TipString) != ""
-	if !hasTip && !AM.isConnecting && AM.editor == nil && AM.configEditor == nil && AM.pendingDelete == nil && AM.pendingSync == nil && AM.pendingConfigExport == nil {
+	if !hasTip && !AM.isConnecting && AM.editor == nil && AM.configEditor == nil && AM.pendingDelete == nil && AM.pendingSync == nil && AM.pendingConfigExport == nil && AM.pendingUpdate == nil {
 		return docStyle.Render(listView)
 	}
 
@@ -1233,6 +1483,11 @@ func (am *AppModel) View() string {
 	if AM.pendingConfigExport != nil {
 		dimmed := dimBaseForOverlay(view)
 		overlayLayer := am.buildConfigExportOverlay(frameWidth)
+		view = overlayCenter(dimmed, overlayLayer)
+	}
+	if AM.pendingUpdate != nil {
+		dimmed := dimBaseForOverlay(view)
+		overlayLayer := am.buildUpdatePromptOverlay(frameWidth)
 		view = overlayCenter(dimmed, overlayLayer)
 	}
 	if tipOverlay != "" {
