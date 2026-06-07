@@ -12,12 +12,10 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/muesli/cancelreader"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/terminal"
-	"golang.org/x/term"
 )
 
 var (
@@ -422,40 +420,4 @@ func genSSHConfig(node *SSHConfig) (*defaultClient, error) {
 	}, nil
 }
 
-// getLocalEraseChar reads the current VERASE character from the local
-// terminal's termios settings. This should be called before MakeRaw
-// overrides the setting, so the value can be forwarded to the remote PTY
-// via SSH TerminalModes. Returns 0 if the value cannot be read.
-func getLocalEraseChar(fd int) byte {
-	oldState, err := term.GetState(fd)
-	if err != nil {
-		return 0
-	}
-	// Restore immediately — we only wanted to peek at the state.
-	// MakeRaw will be called right after this.
-	defer term.Restore(fd, oldState)
 
-	// Use the raw syscall to read termios so we don't depend on
-	// golang.org/x/term internals. VERASE is at index 6 in the
-	// c_cc array on Linux/macOS (POSIX).
-	var t syscall.Termios
-	if _, _, errno := syscall.Syscall6(
-		syscall.SYS_IOCTL,
-		uintptr(fd),
-		uintptr(syscall.TCGETS),
-		uintptr(unsafe.Pointer(&t)),
-		0, 0, 0,
-	); errno != 0 {
-		return 0
-	}
-	// c_cc[VERASE] is at index 6 on Linux, 4 on macOS.
-	// Use the POSIX standard: we check both common positions.
-	// Linux: VERASE = 6, macOS: VERASE = 4
-	// The safest approach: try the value that's non-zero.
-	for _, idx := range []int{6, 4} {
-		if idx < len(t.Cc) && t.Cc[idx] != 0 {
-			return byte(t.Cc[idx])
-		}
-	}
-	return 0
-}
