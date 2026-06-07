@@ -160,8 +160,8 @@ func isNewer(current, latest string) bool {
 		return false
 	}
 	// Semver comparison: compare numeric parts of major.minor.patch
-	cParts := parseSemver(l)
-	lParts := parseSemver(c)
+	cParts := parseSemver(c)
+	lParts := parseSemver(l)
 	for i := 0; i < 3; i++ {
 		if lParts[i] != cParts[i] {
 			return lParts[i] > cParts[i]

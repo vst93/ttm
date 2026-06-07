@@ -437,7 +437,7 @@ func createListWithSelection(selectedIndex int) {
 	AM.list.Styles.PaginationStyle = lipgloss.NewStyle().
 		PaddingLeft(2)
 	AM.list.Styles.HelpStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("241")).
+		Foreground(lipgloss.Color("248")).
 		Padding(0, 0, 0, 2)
 	AM.list.Styles.DividerDot = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("238")).
