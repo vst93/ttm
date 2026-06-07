@@ -851,7 +851,6 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case initMsg:
 		AM.BookmarkInfo.Init()
-		fmt.Print("\033[?25h")
 		createList()
 		return am, nil
 	case refreshMsg:
@@ -1245,8 +1244,11 @@ func (am *AppModel) startUpdate() tea.Cmd {
 			return nil
 		}
 		s.dlStatus = dlModelDownloading
+		s.dlProgress = 0
 		return func() tea.Msg {
-			ok, msg := performUpdate(r.DownloadURL, r.Latest)
+			ok, msg := performUpdate(r.DownloadURL, r.Latest, func(p float64) {
+				s.dlProgress = p
+			})
 			if ok {
 				s.dlStatus = dlModelDone
 				return updateDownloadResultMsg{Success: true, Output: msg}
@@ -1323,8 +1325,15 @@ func (am *AppModel) buildUpdatePromptOverlay(frameWidth int) string {
 	statusLine := ""
 	switch s.dlStatus {
 	case dlModelDownloading:
+		pct := int(s.dlProgress * 100)
+		barWidth := 20
+		filled := int(s.dlProgress * float64(barWidth))
+		if filled > barWidth {
+			filled = barWidth
+		}
+		bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
 		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Render(
-			am.t("  ⟳ Updating...", "  ⟳ 正在更新..."),
+			fmt.Sprintf("  ⟳ %s %3d%%", bar, pct),
 		)
 	case dlModelDone:
 		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("78")).Render(

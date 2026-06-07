@@ -70,11 +70,16 @@ const (
 
 // updatePromptState holds the interactive update confirmation state.
 type updatePromptState struct {
-	Result    updateCheckResult
-	confirmed bool
-	selected  int // 0 = default action, 1 = cancel
-	dlStatus  dlModel
-	dlError   string
+	Result      updateCheckResult
+	confirmed   bool
+	selected    int // 0 = default action, 1 = cancel
+	dlStatus    dlModel
+	dlError     string
+	dlProgress  float64 // 0.0 ~ 1.0
+}
+
+type updateProgressMsg struct {
+	Progress float64
 }
 
 func detectInstallMethod() installMethod {
@@ -151,7 +156,28 @@ func isNewer(current, latest string) bool {
 	if c == "dev" || c == "" {
 		return l != ""
 	}
-	return l != c
+	if l == c {
+		return false
+	}
+	// Semver comparison: compare numeric parts of major.minor.patch
+	cParts := parseSemver(l)
+	lParts := parseSemver(c)
+	for i := 0; i < 3; i++ {
+		if lParts[i] != cParts[i] {
+			return lParts[i] > cParts[i]
+		}
+	}
+	return false
+}
+
+// parseSemver parses "1.2.3" into [3]int{1, 2, 3}.
+// Missing parts default to 0.
+func parseSemver(v string) [3]int {
+	var parts [3]int
+	for i, p := range strings.SplitN(v, ".", 3) {
+		fmt.Sscanf(p, "%d", &parts[i])
+	}
+	return parts
 }
 
 func checkUpdate() updateCheckResult {
@@ -202,7 +228,8 @@ func checkUpdate() updateCheckResult {
 // performUpdate downloads the release zip for the current platform,
 // extracts it, and replaces the running binary.
 // Returns (success, message).
-func performUpdate(downloadURL, latest string) (bool, string) {
+// onProgress is called with a value between 0.0 and 1.0 during download.
+func performUpdate(downloadURL, latest string, onProgress func(float64)) (bool, string) {
 	if downloadURL == "" {
 		return false, "no download URL for this platform"
 	}
@@ -237,7 +264,13 @@ func performUpdate(downloadURL, latest string) (bool, string) {
 		return false, fmt.Sprintf("download returned %d", resp.StatusCode)
 	}
 
-	if _, err := io.Copy(out, resp.Body); err != nil {
+	totalSize := resp.ContentLength
+	progressReader := &progressReadCloser{
+		ReadCloser: resp.Body,
+		total:      totalSize,
+		onProgress: onProgress,
+	}
+	if _, err := io.Copy(out, progressReader); err != nil {
 		out.Close()
 		os.Remove(zipPath)
 		return false, fmt.Sprintf("download interrupted: %v", err)
@@ -341,4 +374,27 @@ func brewUpgrade() (bool, string) {
 		return false, fmt.Sprintf("brew upgrade failed: %s", strings.TrimSpace(string(out)))
 	}
 	return true, strings.TrimSpace(string(out))
+}
+
+// progressReadCloser wraps an io.ReadCloser to report read progress.
+type progressReadCloser struct {
+	io.ReadCloser
+	total      int64
+	read       int64
+	onProgress func(float64)
+	lastReport float64
+}
+
+func (p *progressReadCloser) Read(b []byte) (int, error) {
+	n, err := p.ReadCloser.Read(b)
+	p.read += int64(n)
+	if p.onProgress != nil && p.total > 0 {
+		progress := float64(p.read) / float64(p.total)
+		// Report at 1% increments to avoid flooding
+		if progress-p.lastReport >= 0.01 || progress >= 1.0 {
+			p.lastReport = progress
+			p.onProgress(progress)
+		}
+	}
+	return n, err
 }
