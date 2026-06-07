@@ -196,6 +196,7 @@ type AppModel struct {
 	configKey           key.Binding
 	updateKey           key.Binding
 	langToggleKey       key.Binding
+	copySSHKey          key.Binding
 	editor              *bookmarkEditor
 	configEditor        *configEditor
 	pendingDelete       *deleteConfirmState
@@ -252,6 +253,10 @@ func (am *AppModel) Init() tea.Cmd {
 	am.langToggleKey = key.NewBinding(
 		key.WithKeys("L"),
 		key.WithHelp("L", "lang"),
+	)
+	am.copySSHKey = key.NewBinding(
+		key.WithKeys("y"),
+		key.WithHelp("y", "copy ssh"),
 	)
 	return func() tea.Msg { return initMsg{} }
 }
@@ -437,16 +442,16 @@ func createListWithSelection(selectedIndex int) {
 	AM.list.Styles.PaginationStyle = lipgloss.NewStyle().
 		PaddingLeft(2)
 	AM.list.Styles.HelpStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("248")).
+		Foreground(lipgloss.Color("252")).
 		Padding(0, 0, 0, 2)
 	AM.list.Styles.DividerDot = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("238")).
 		SetString(" · ")
 	AM.list.AdditionalShortHelpKeys = func() []key.Binding {
-		return []key.Binding{AM.connectKey, AM.syncKey, AM.addKey, AM.starKey, AM.configKey, AM.langToggleKey}
+		return []key.Binding{AM.connectKey, AM.syncKey, AM.addKey, AM.starKey, AM.configKey, AM.copySSHKey, AM.langToggleKey}
 	}
 	AM.list.AdditionalFullHelpKeys = func() []key.Binding {
-		return []key.Binding{AM.connectKey, AM.syncKey, AM.addKey, AM.editKey, AM.deleteKey, AM.starKey, AM.configKey, AM.updateKey, AM.langToggleKey}
+		return []key.Binding{AM.connectKey, AM.syncKey, AM.addKey, AM.editKey, AM.deleteKey, AM.starKey, AM.configKey, AM.copySSHKey, AM.updateKey, AM.langToggleKey}
 	}
 	// Re-trigger pagination calc after styles changed (padding differs from defaults)
 	AM.list.SetSize(listWidth, listHeight)
@@ -921,6 +926,8 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return am, tea.Batch(tipCmd, func() tea.Msg {
 				return updateCheckMsg{Result: checkUpdate()}
 			})
+		} else if !isFiltering && msg.String() == "y" {
+			return am, am.copySelectedSSHCommand()
 		} else if !isFiltering && (msg.String() == "s" || msg.String() == "S") {
 			requireGistID := msg.String() == "S"
 			if tip := am.checkSyncConfig(requireGistID); tip != nil {
@@ -1503,4 +1510,37 @@ func (am *AppModel) View() string {
 		view = overlayTopRight(view, tipOverlay)
 	}
 	return docStyle.Render(view)
+}
+
+// copySelectedSSHCommand builds the ssh command for the selected bookmark,
+// copies it to clipboard (with Termux OSC52 fallback), and returns a tip
+// showing the command so the user can manually select and copy it too.
+func (am *AppModel) copySelectedSSHCommand() tea.Cmd {
+	idx := AM.list.GlobalIndex()
+	if idx < 0 || idx >= len(AM.BookmarkInfo.List) {
+		return setTip(am.t("no bookmark selected", "未选中任何书签"), tipError)
+	}
+	bm := AM.BookmarkInfo.List[idx]
+	host := bm.Host
+	if host == "" {
+		return setTip(am.t("bookmark has no host", "该书签没有主机地址"), tipError)
+	}
+	user := bm.Username
+	if user == "" {
+		user = "root"
+	}
+	port := bm.Port
+	if port <= 0 {
+		port = 22
+	}
+	cmd := fmt.Sprintf("ssh %s@%s -p %d", user, host, port)
+	usedOSC52Only, err := writeTextToClipboard(cmd)
+	if err != nil {
+		return setTip(am.t("copy failed: ", "复制失败: ")+err.Error(), tipError)
+	}
+	label := am.t("copied", "已复制")
+	if usedOSC52Only {
+		label = am.t("copied (terminal clipboard)", "已复制（终端剪贴板）")
+	}
+	return setTip(fmt.Sprintf("%s: %s", label, cmd), tipSuccess)
 }
