@@ -138,11 +138,18 @@ const readBufSize = 32 * 1024
 // startStdinCopyWithIntercept is like startStdinCopy but intercepts Ctrl+G
 // (0x07, BEL) to trigger a handler. F12 (ESC [24~) is intentionally NOT
 // intercepted because its escape sequence frequently collides with terminal
-// protocol responses (cursor position queries, capability reports) sent by
-// macOS Terminal.app and other terminals during SSH session setup.
+// protocol responses sent by macOS Terminal.app and other terminals during
+// SSH session setup.
 //
-// Uses buffered reading for performance: data is read in large chunks and
-// scanned for trigger bytes.
+// Uses a debounce mechanism to distinguish genuine Ctrl+G keypresses from
+// terminal protocol noise. When a Ctrl+G byte arrives:
+//   - If armed (no recent Ctrl+G): trigger immediately, disarm, start 500ms window
+//   - If in debounce window (noise): forward without triggering, reset window
+//   - After window expires: re-arm for next genuine keypress
+//
+// This works because terminal noise sends 0x07 in rapid bursts (sub-50ms),
+// keeping the debounce window open continuously. After noise stops, the window
+// closes and the user's next Ctrl+G triggers normally.
 //
 // The handleTrigger callback receives the stdinReader so it can read user
 // input directly (e.g. for a dialog). It is called synchronously, blocking
@@ -153,17 +160,19 @@ func startStdinCopyWithIntercept(stdinPipe io.WriteCloser, handleTrigger func(io
 		return nil, nil, err
 	}
 
-	// uploadTriggerGracePeriod is the time after SSH session starts during
-	// which Ctrl+G is forwarded without triggering. This prevents terminal
-	// protocol sequences sent during SSH setup from accidentally triggering
-	// the upload dialog on macOS Terminal.app and similar terminals.
-	const uploadTriggerGracePeriod = 3 * time.Second
+	// debounceWindow is the time window after seeing a Ctrl+G byte during
+	// which subsequent Ctrl+G bytes are considered noise and suppressed.
+	// Terminal protocol noise (macOS Terminal.app) sends 0x07 in rapid
+	// bursts (sub-50ms intervals), so the window resets on each 0x07,
+	// keeping the "noisy" state active. After noise stops (500ms quiet),
+	// the window closes and the next Ctrl+G triggers the upload dialog.
+	const debounceWindow = 500 * time.Millisecond
 
 	done := make(chan error, 1)
 	go func() {
 		buf := make([]byte, readBufSize)
-		sessionStart := time.Now()
-		graceActive := true
+		var lastCtrlG time.Time // time of last forwarded (non-triggering) Ctrl+G
+		ctrlGArmed := true      // true = next Ctrl+G triggers; false = in debounce window
 
 		forward := func(data []byte) error {
 			if len(data) == 0 {
@@ -176,25 +185,63 @@ func startStdinCopyWithIntercept(stdinPipe io.WriteCloser, handleTrigger func(io
 		for {
 			n, readErr := stdinReader.Read(buf)
 			if n > 0 {
-				// Check if we're still in the grace period.
-				if graceActive {
-					if time.Since(sessionStart) < uploadTriggerGracePeriod {
-						// During grace period: forward everything without triggering.
-						_ = forward(buf[:n])
-					} else {
-						graceActive = false
-						result := processChunk(buf[:n], forward, stdinReader, handleTrigger)
-						if result.action == chunkDone {
-							return
-						}
-					}
-				} else {
-					result := processChunk(buf[:n], forward, stdinReader, handleTrigger)
-					if result.action == chunkDone {
-						return
+				data := buf[:n]
+
+				// Count Ctrl+G bytes in this chunk.
+				ctrlGCount := 0
+				for _, b := range data {
+					if b == ctrlGByte {
+						ctrlGCount++
 					}
 				}
+
+				if ctrlGCount > 0 {
+					now := time.Now()
+
+					if !ctrlGArmed {
+						// We're in debounce window — check if it expired.
+						if now.Sub(lastCtrlG) >= debounceWindow {
+							// Window expired. Re-arm.
+							ctrlGArmed = true
+						}
+					}
+
+					if ctrlGArmed && ctrlGCount == 1 {
+						// Single Ctrl+G while armed → user pressed Ctrl+G. Trigger!
+						if err := forward(data); err != nil {
+							done <- err
+							_ = stdinPipe.Close()
+							return
+						}
+						if handleTrigger != nil {
+							handleTrigger(stdinReader)
+						}
+						// Disarm and start debounce window.
+						ctrlGArmed = false
+						lastCtrlG = now
+						goto checkErr
+					}
+
+					// Multiple Ctrl+G in one chunk, or single while disarmed → noise.
+					// Forward as-is and update debounce timer.
+					if err := forward(data); err != nil {
+						done <- err
+						_ = stdinPipe.Close()
+						return
+					}
+					lastCtrlG = now
+					ctrlGArmed = false
+					goto checkErr
+				}
+
+				// No Ctrl+G in this chunk — forward normally.
+				if err := forward(data); err != nil {
+					done <- err
+					_ = stdinPipe.Close()
+					return
+				}
 			}
+		checkErr:
 			if readErr != nil {
 				if readErr == io.EOF {
 					done <- nil
@@ -234,7 +281,7 @@ func processChunk(data []byte, forward func([]byte) error, stdinReader io.Reader
 	for i < len(data) {
 		b := data[i]
 
-		// ── Ctrl+G: trigger ──
+		// ── Ctrl+G (0x07): single-press trigger ──
 		if b == ctrlGByte {
 			if err := forward(data[:i]); err != nil {
 				return chunkResult{action: chunkDone}
