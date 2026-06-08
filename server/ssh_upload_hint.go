@@ -131,20 +131,18 @@ func buildSSHConnInfo(client *ssh.Client, node *SSHConfig) sshConnInfo {
 // ctrlGByte is the byte value for Ctrl+G (0x07, BEL). Primary trigger.
 const ctrlGByte byte = 0x07
 
-// f12Sequence is the escape sequence for the F12 key in most terminals.
-// Format: ESC [ 2 4 ~   (backup trigger)
-var f12Sequence = []byte{0x1b, 0x5b, 0x32, 0x34, 0x7e}
-
 // readBufSize is the buffer size for stdin reads. Matches typical io.Copy
 // buffer size for parity with the original unintercepted path.
 const readBufSize = 32 * 1024
 
 // startStdinCopyWithIntercept is like startStdinCopy but intercepts Ctrl+G
-// (primary) and F12 (backup) to trigger a handler.
+// (0x07, BEL) to trigger a handler. F12 (ESC [24~) is intentionally NOT
+// intercepted because its escape sequence frequently collides with terminal
+// protocol responses (cursor position queries, capability reports) sent by
+// macOS Terminal.app and other terminals during SSH session setup.
 //
 // Uses buffered reading for performance: data is read in large chunks and
-// scanned for trigger bytes, only falling back to byte-level inspection
-// when a potential escape sequence is in progress.
+// scanned for trigger bytes.
 //
 // The handleTrigger callback receives the stdinReader so it can read user
 // input directly (e.g. for a dialog). It is called synchronously, blocking
@@ -155,12 +153,17 @@ func startStdinCopyWithIntercept(stdinPipe io.WriteCloser, handleTrigger func(io
 		return nil, nil, err
 	}
 
+	// uploadTriggerGracePeriod is the time after SSH session starts during
+	// which Ctrl+G is forwarded without triggering. This prevents terminal
+	// protocol sequences sent during SSH setup from accidentally triggering
+	// the upload dialog on macOS Terminal.app and similar terminals.
+	const uploadTriggerGracePeriod = 3 * time.Second
+
 	done := make(chan error, 1)
 	go func() {
 		buf := make([]byte, readBufSize)
-		// leftover holds bytes carried over from the previous read when a
-		// potential F12 sequence was split across buffer boundaries.
-		var leftover []byte
+		sessionStart := time.Now()
+		graceActive := true
 
 		forward := func(data []byte) error {
 			if len(data) == 0 {
@@ -173,23 +176,23 @@ func startStdinCopyWithIntercept(stdinPipe io.WriteCloser, handleTrigger func(io
 		for {
 			n, readErr := stdinReader.Read(buf)
 			if n > 0 {
-				data := buf[:n]
-				if len(leftover) > 0 {
-					data = append(leftover, data...)
-					leftover = nil
-				}
-
-				result := processChunk(data, forward, stdinReader, handleTrigger)
-				switch result.action {
-				case chunkTriggered:
-					// Handler returned; continue reading.
-				case chunkLeftover:
-					leftover = result.remaining
-				case chunkDone:
-					// Error already forwarded to done channel.
-					return
-				case chunkOK:
-					// All bytes forwarded.
+				// Check if we're still in the grace period.
+				if graceActive {
+					if time.Since(sessionStart) < uploadTriggerGracePeriod {
+						// During grace period: forward everything without triggering.
+						_ = forward(buf[:n])
+					} else {
+						graceActive = false
+						result := processChunk(buf[:n], forward, stdinReader, handleTrigger)
+						if result.action == chunkDone {
+							return
+						}
+					}
+				} else {
+					result := processChunk(buf[:n], forward, stdinReader, handleTrigger)
+					if result.action == chunkDone {
+						return
+					}
 				}
 			}
 			if readErr != nil {
@@ -212,8 +215,7 @@ func startStdinCopyWithIntercept(stdinPipe io.WriteCloser, handleTrigger func(io
 
 // chunkResult describes what processChunk did.
 type chunkResult struct {
-	action    chunkAction
-	remaining []byte // bytes to carry over (only for chunkLeftover)
+	action chunkAction
 }
 
 type chunkAction int
@@ -221,18 +223,18 @@ type chunkAction int
 const (
 	chunkOK        chunkAction = iota // all bytes forwarded
 	chunkTriggered                    // handler was called
-	chunkLeftover                     // partial escape sequence at end
 	chunkDone                         // error occurred, caller should stop
 )
 
-// processChunk scans a chunk of stdin data for trigger bytes and forwards
-// non-trigger data to the SSH pipe.
+// processChunk scans a chunk of stdin data for Ctrl+G (0x07) and forwards
+// all other data to the SSH pipe. F12 escape sequence interception was
+// removed because it frequently collides with terminal protocol responses.
 func processChunk(data []byte, forward func([]byte) error, stdinReader io.Reader, handleTrigger func(io.Reader)) chunkResult {
 	i := 0
 	for i < len(data) {
 		b := data[i]
 
-		// ── Ctrl+G: primary trigger ──
+		// ── Ctrl+G: trigger ──
 		if b == ctrlGByte {
 			if err := forward(data[:i]); err != nil {
 				return chunkResult{action: chunkDone}
@@ -242,37 +244,6 @@ func processChunk(data []byte, forward func([]byte) error, stdinReader io.Reader
 			}
 			data = data[i+1:]
 			i = 0
-			continue
-		}
-
-		// ── ESC: potential F12 sequence ──
-		if b == 0x1b {
-			remaining := len(data) - i
-			if remaining >= len(f12Sequence) {
-				if bytes.Equal(data[i:i+len(f12Sequence)], f12Sequence) {
-					if err := forward(data[:i]); err != nil {
-						return chunkResult{action: chunkDone}
-					}
-					if handleTrigger != nil {
-						handleTrigger(stdinReader)
-					}
-					data = data[i+len(f12Sequence):]
-					i = 0
-					continue
-				}
-				i++
-				continue
-			}
-
-			if bytes.Equal(data[i:], f12Sequence[:remaining]) {
-				if err := forward(data[:i]); err != nil {
-					return chunkResult{action: chunkDone}
-				}
-				rem := make([]byte, len(data)-i)
-				copy(rem, data[i:])
-				return chunkResult{action: chunkLeftover, remaining: rem}
-			}
-			i++
 			continue
 		}
 

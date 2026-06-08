@@ -108,17 +108,6 @@ func TestLocaleHelper(t *testing.T) {
 	}
 }
 
-func TestF12SequenceConstant(t *testing.T) {
-	want := []byte{0x1b, 0x5b, 0x32, 0x34, 0x7e}
-	if len(f12Sequence) != len(want) {
-		t.Fatalf("f12Sequence length = %d, want %d", len(f12Sequence), len(want))
-	}
-	for i, b := range want {
-		if f12Sequence[i] != b {
-			t.Errorf("f12Sequence[%d] = 0x%02x, want 0x%02x", i, f12Sequence[i], b)
-		}
-	}
-}
 
 func TestCtrlGByteConstant(t *testing.T) {
 	if ctrlGByte != 0x07 {
@@ -290,109 +279,11 @@ func TestProcessChunk_MultipleCtrlG(t *testing.T) {
 	}
 }
 
-func TestProcessChunk_F12(t *testing.T) {
-	h := &chunkTestHarness{}
-	data := f12Sequence
-	r := processChunk(data, h.forward, nil, h.handleTrigger)
-	if r.action != chunkOK {
-		t.Errorf("action = %d, want chunkOK", r.action)
-	}
-	if h.triggered != 1 {
-		t.Errorf("triggered = %d, want 1", h.triggered)
-	}
-	if len(h.forwarded) != 0 {
-		t.Errorf("forwarded %d bytes, want 0", len(h.forwarded))
-	}
-}
 
-func TestProcessChunk_F12WithSurroundingData(t *testing.T) {
-	h := &chunkTestHarness{}
-	f12 := f12Sequence
-	data := append(append([]byte("before"), f12...), []byte("after")...)
-	r := processChunk(data, h.forward, nil, h.handleTrigger)
-	if r.action != chunkOK {
-		t.Errorf("action = %d, want chunkOK", r.action)
-	}
-	if h.triggered != 1 {
-		t.Errorf("triggered = %d, want 1", h.triggered)
-	}
-	if !bytes.Equal(h.forwarded, []byte("beforeafter")) {
-		t.Errorf("forwarded = %q, want %q", h.forwarded, "beforeafter")
-	}
-}
 
-func TestProcessChunk_PartialF12AtEnd(t *testing.T) {
-	h := &chunkTestHarness{}
-	partial := f12Sequence[:3]
-	data := append([]byte("hello"), partial...)
-	r := processChunk(data, h.forward, nil, h.handleTrigger)
-	if r.action != chunkLeftover {
-		t.Errorf("action = %d, want chunkLeftover", r.action)
-	}
-	if !bytes.Equal(r.remaining, partial) {
-		t.Errorf("remaining = %x, want %x", r.remaining, partial)
-	}
-	if !bytes.Equal(h.forwarded, []byte("hello")) {
-		t.Errorf("forwarded = %q, want %q", h.forwarded, "hello")
-	}
-	if h.triggered != 0 {
-		t.Errorf("triggered = %d, want 0", h.triggered)
-	}
-}
 
-func TestProcessChunk_PartialF12NotPrefix(t *testing.T) {
-	h := &chunkTestHarness{}
-	data := []byte{0x1b, 0x5b, 0xff}
-	r := processChunk(data, h.forward, nil, h.handleTrigger)
-	if r.action != chunkOK {
-		t.Errorf("action = %d, want chunkOK", r.action)
-	}
-	if !bytes.Equal(h.forwarded, data) {
-		t.Errorf("forwarded = %x, want %x", h.forwarded, data)
-	}
-	if h.triggered != 0 {
-		t.Errorf("triggered = %d, want 0", h.triggered)
-	}
-}
 
-func TestProcessChunk_StandaloneESC(t *testing.T) {
-	h := &chunkTestHarness{}
-	data := []byte{0x1b}
-	r := processChunk(data, h.forward, nil, h.handleTrigger)
-	if r.action != chunkLeftover {
-		t.Errorf("action = %d, want chunkLeftover", r.action)
-	}
-	if !bytes.Equal(r.remaining, []byte{0x1b}) {
-		t.Errorf("remaining = %x, want [0x1b]", r.remaining)
-	}
-}
 
-func TestProcessChunk_F12SplitAcrossChunks(t *testing.T) {
-	h := &chunkTestHarness{}
-
-	chunk1 := append([]byte("hello"), f12Sequence[:2]...)
-	r1 := processChunk(chunk1, h.forward, nil, h.handleTrigger)
-	if r1.action != chunkLeftover {
-		t.Fatalf("chunk1 action = %d, want chunkLeftover", r1.action)
-	}
-	if !bytes.Equal(h.forwarded, []byte("hello")) {
-		t.Errorf("after chunk1: forwarded = %q, want %q", h.forwarded, "hello")
-	}
-
-	leftover := r1.remaining
-	chunk2 := append(f12Sequence[2:], []byte("world")...)
-	combined := append(leftover, chunk2...)
-	r2 := processChunk(combined, h.forward, nil, h.handleTrigger)
-	if r2.action != chunkOK {
-		t.Errorf("chunk2 action = %d, want chunkOK", r2.action)
-	}
-	if h.triggered != 1 {
-		t.Errorf("triggered = %d, want 1", h.triggered)
-	}
-	if !bytes.Equal(h.forwarded, []byte("helloworld")) {
-		t.Errorf("forwarded = %q, want %q", h.forwarded, "helloworld")
-	}
-}
 
 func TestProcessChunk_LargeDataNoTriggers(t *testing.T) {
 	h := &chunkTestHarness{}

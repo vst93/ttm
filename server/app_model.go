@@ -263,8 +263,8 @@ func (am *AppModel) Init() tea.Cmd {
 		key.WithHelp("y", "ssh cmd"),
 	)
 	am.uploadKey = key.NewBinding(
-		key.WithKeys("Ctrl+G", "F12"),
-		key.WithHelp("Ctrl+G/F12", "upload (SSH)"),
+		key.WithKeys("Ctrl+G"),
+		key.WithHelp("Ctrl+G", "upload (SSH)"),
 	)
 	return func() tea.Msg { return initMsg{} }
 }
@@ -345,7 +345,7 @@ func (am *AppModel) applyListLocale() {
 		am.updateKey.SetHelp("u", "更新")
 		am.langToggleKey.SetHelp("L", "语言")
 		am.copySSHKey.SetHelp("y", "SSH 命令")
-		am.uploadKey.SetHelp("Ctrl+G/F12", "上传 (SSH)")
+		am.uploadKey.SetHelp("Ctrl+G", "上传 (SSH)")
 		return
 	}
 
@@ -376,7 +376,7 @@ func (am *AppModel) applyListLocale() {
 	am.updateKey.SetHelp("u", "update")
 	am.langToggleKey.SetHelp("L", "language")
 	am.copySSHKey.SetHelp("y", "ssh cmd")
-	am.uploadKey.SetHelp("Ctrl+G/F12", "upload (SSH)")
+	am.uploadKey.SetHelp("Ctrl+G", "upload (SSH)")
 }
 
 // wrapText wraps a (possibly multiline) string to fit within max width per line.
