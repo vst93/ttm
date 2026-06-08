@@ -15,6 +15,13 @@ import (
 )
 
 func main() {
+	// Set Windows console to UTF-8 for proper CJK display/input.
+	var oldInputCP, oldOutputCP uint32
+	if runtime.GOOS == "windows" {
+		oldInputCP, oldOutputCP = initConsoleUTF8()
+		defer restoreConsoleCP(oldInputCP, oldOutputCP)
+	}
+
 	if len(os.Args) > 2 && os.Args[1] == "--import-config" {
 		importConfig(os.Args[2])
 		return
