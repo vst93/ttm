@@ -501,7 +501,7 @@ func createListWithSelection(selectedIndex int) {
 		Foreground(lipgloss.Color("238")).
 		SetString(" · ")
 	AM.list.AdditionalShortHelpKeys = func() []key.Binding {
-		return []key.Binding{AM.connectKey, AM.syncKey, AM.addKey, AM.starKey, AM.configKey, AM.copySSHKey, AM.uploadKey, AM.langToggleKey}
+		return []key.Binding{AM.connectKey, AM.syncKey, AM.addKey, AM.starKey, AM.configKey, AM.copySSHKey, AM.langToggleKey}
 	}
 	AM.list.AdditionalFullHelpKeys = func() []key.Binding {
 		return []key.Binding{AM.connectKey, AM.syncKey, AM.addKey, AM.editKey, AM.deleteKey, AM.starKey, AM.configKey, AM.copySSHKey, AM.uploadKey, AM.updateKey, AM.langToggleKey}
