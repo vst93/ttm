@@ -197,18 +197,19 @@ type AppModel struct {
 	updateKey           key.Binding
 	langToggleKey       key.Binding
 	copySSHKey          key.Binding
+	uploadKey           key.Binding
 	editor              *bookmarkEditor
 	configEditor        *configEditor
 	pendingDelete       *deleteConfirmState
 	pendingSync         *syncConfirmState
 	pendingConfigExport *configExportState
-	pendingUpdate      *updatePromptState
-	isConnecting       bool
-	isUpdating         bool
-	isSyncing          bool
-	enterKeyAt         time.Time
-	width              int
-	height             int
+	pendingUpdate       *updatePromptState
+	isConnecting        bool
+	isUpdating          bool
+	isSyncing           bool
+	enterKeyAt          time.Time
+	width               int
+	height              int
 }
 
 var AM = AppModel{}
@@ -252,11 +253,15 @@ func (am *AppModel) Init() tea.Cmd {
 	)
 	am.langToggleKey = key.NewBinding(
 		key.WithKeys("L"),
-		key.WithHelp("L", "lang"),
+		key.WithHelp("L", "language"),
 	)
 	am.copySSHKey = key.NewBinding(
 		key.WithKeys("y"),
-		key.WithHelp("y", "copy ssh"),
+		key.WithHelp("y", "ssh cmd"),
+	)
+	am.uploadKey = key.NewBinding(
+		key.WithKeys("Ctrl+G", "F12"),
+		key.WithHelp("Ctrl+G/F12", "upload (SSH)"),
 	)
 	return func() tea.Msg { return initMsg{} }
 }
@@ -336,6 +341,8 @@ func (am *AppModel) applyListLocale() {
 		am.configKey.SetHelp("c", "配置")
 		am.updateKey.SetHelp("u", "更新")
 		am.langToggleKey.SetHelp("L", "语言")
+		am.copySSHKey.SetHelp("y", "SSH 命令")
+		am.uploadKey.SetHelp("Ctrl+G/F12", "上传 (SSH)")
 		return
 	}
 
@@ -364,7 +371,9 @@ func (am *AppModel) applyListLocale() {
 	am.starKey.SetHelp("*", "star")
 	am.configKey.SetHelp("c", "config")
 	am.updateKey.SetHelp("u", "update")
-	am.langToggleKey.SetHelp("L", "lang")
+	am.langToggleKey.SetHelp("L", "language")
+	am.copySSHKey.SetHelp("y", "ssh cmd")
+	am.uploadKey.SetHelp("Ctrl+G/F12", "upload (SSH)")
 }
 
 func getListSize(width, height int) (int, int) {
@@ -448,10 +457,10 @@ func createListWithSelection(selectedIndex int) {
 		Foreground(lipgloss.Color("238")).
 		SetString(" · ")
 	AM.list.AdditionalShortHelpKeys = func() []key.Binding {
-		return []key.Binding{AM.connectKey, AM.syncKey, AM.addKey, AM.starKey, AM.configKey, AM.copySSHKey, AM.langToggleKey}
+		return []key.Binding{AM.connectKey, AM.syncKey, AM.addKey, AM.starKey, AM.configKey, AM.copySSHKey, AM.uploadKey, AM.langToggleKey}
 	}
 	AM.list.AdditionalFullHelpKeys = func() []key.Binding {
-		return []key.Binding{AM.connectKey, AM.syncKey, AM.addKey, AM.editKey, AM.deleteKey, AM.starKey, AM.configKey, AM.copySSHKey, AM.updateKey, AM.langToggleKey}
+		return []key.Binding{AM.connectKey, AM.syncKey, AM.addKey, AM.editKey, AM.deleteKey, AM.starKey, AM.configKey, AM.copySSHKey, AM.uploadKey, AM.updateKey, AM.langToggleKey}
 	}
 	// Re-trigger pagination calc after styles changed (padding differs from defaults)
 	AM.list.SetSize(listWidth, listHeight)

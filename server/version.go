@@ -70,12 +70,12 @@ const (
 
 // updatePromptState holds the interactive update confirmation state.
 type updatePromptState struct {
-	Result      updateCheckResult
-	confirmed   bool
-	selected    int // 0 = default action, 1 = cancel
-	dlStatus    dlModel
-	dlError     string
-	dlProgress  float64 // 0.0 ~ 1.0
+	Result     updateCheckResult
+	confirmed  bool
+	selected   int // 0 = default action, 1 = cancel
+	dlStatus   dlModel
+	dlError    string
+	dlProgress float64 // 0.0 ~ 1.0
 }
 
 type updateProgressMsg struct {

@@ -294,7 +294,17 @@ func (c *defaultClient) Login() error {
 		}
 	}
 
-	stdinCopyDone, cancelStdinCopy, err := startStdinCopy(stdinPipe)
+	connInfo := buildSSHConnInfo(client, c.node)
+	currentLocale := AM.locale
+
+	handleUploadTrigger := func(reader io.Reader) {
+		if !shouldTriggerUploadHint() {
+			return
+		}
+		uploadWithDialog(reader, stdinPipe, client, connInfo, currentLocale)
+	}
+
+	stdinCopyDone, cancelStdinCopy, err := startStdinCopyWithIntercept(stdinPipe, handleUploadTrigger)
 	if err != nil {
 		return fmt.Errorf("open local stdin reader: %w", err)
 	}
@@ -419,5 +429,3 @@ func genSSHConfig(node *SSHConfig) (*defaultClient, error) {
 		node:         node,
 	}, nil
 }
-
-

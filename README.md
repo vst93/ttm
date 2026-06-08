@@ -44,6 +44,7 @@ Manage, sync and connect to your servers — all from the terminal.
 - **Update check** — press `u` to check for new releases, with download progress bar
 - **Cross-platform** — macOS, Linux, Windows, Android (Termux)
 - **Copy SSH command** — press `y` to copy the standard SSH command for the selected bookmark (e.g. `ssh user@host -p 22`), with Termux OSC52 fallback; the command is shown in the tip bar for manual copy too
+- **Remote file transfer** — press `Ctrl+G` or `F12` during an SSH session to upload or download files/directories via SCP protocol (reuses existing connection, no re-authentication; remote path supports Tab completion; downloads default to ~/Downloads with customizable save directory)
 
 ### Installation
 
@@ -124,6 +125,8 @@ Config directory: `~/.config/ttm/` (Linux), `~/Library/Application Support/ttm/`
 
 ### Keybindings
 
+**Main list:**
+
 | Key | Action | Key | Action |
 |-----|--------|-----|--------|
 | `Enter` | Connect | `a` | Add bookmark |
@@ -136,6 +139,35 @@ Config directory: `~/.config/ttm/` (Linux), `~/Library/Application Support/ttm/`
 | `q` | Quit | | |
 
 **Editor shortcuts:** `Ctrl+S` save, `Ctrl+R` reveal/hide secrets, `Ctrl+Y` copy field, `Ctrl+U` clear field, `Ctrl+V` paste, `Ctrl+B` export config.
+
+**SSH session shortcuts:**
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+G` / `F12` | Open transfer dialog (copy scp command, upload, or download) |
+| `Esc` / `Ctrl+C` | Cancel ongoing transfer |
+| `Tab` | Auto-complete remote path (in download dialog) |
+
+**Transfer dialog flow:**
+1. Press `Ctrl+G` or `F12` during an SSH session
+2. Choose: `1` copy scp command to clipboard, `2` upload local file/directory, `3` download remote file/directory
+3. If uploading: confirm remote directory (auto-detected), enter local path, confirm before transfer
+4. If downloading: enter remote path (Tab to complete), choose local save directory (default ~/Downloads), confirm before transfer
+5. Progress bar shows transfer speed and ETA
+6. Supports both single files and recursive directory transfer
+
+### Platform Compatibility
+
+| Feature | Linux/macOS Server | Windows Server |
+|---------|-------------------|----------------|
+| Upload/Download | ✅ Full support | ❌ Not supported (use scp command instead) |
+| Tab path completion | ✅ | ❌ |
+| Auto-detect remote directory | ✅ | ❌ Falls back to home directory |
+
+**Local terminal notes:**
+- **Windows Terminal** — fully supported (ANSI escape sequences enabled by default)
+- **Old cmd.exe** — UI may display incorrectly; recommend upgrading to Windows Terminal
+- **Termux (Android)** — fully supported
 
 ### License
 
@@ -168,6 +200,7 @@ Config directory: `~/.config/ttm/` (Linux), `~/Library/Application Support/ttm/`
 - **版本检查** — 按 `u` 检查新版本，下载时显示进度条
 - **跨平台** — macOS、Linux、Windows、Android (Termux)
 - **复制 SSH 命令** — 按 `y` 复制选中书签的标准 SSH 命令（如 `ssh user@host -p 22`），兼容 Termux OSC52；命令同时显示在提示栏，支持手动选中复制
+- **远程文件传输** — SSH 会话中按 `Ctrl+G` 或 `F12`，可上传或下载文件/目录（SCP 协议，复用已有连接，远程路径支持 Tab 补全，下载默认 ~/Downloads 可自定义）
 
 ### 安装
 
@@ -248,6 +281,8 @@ ttm
 
 ### 快捷键
 
+**主列表：**
+
 | 按键 | 功能 | 按键 | 功能 |
 |------|------|------|------|
 | `Enter` | 连接 | `a` | 新增书签 |
@@ -260,6 +295,35 @@ ttm
 | `q` | 退出 | | |
 
 **编辑器快捷键：** `Ctrl+S` 保存、`Ctrl+R` 显示/隐藏敏感字段、`Ctrl+Y` 复制字段、`Ctrl+U` 清空字段、`Ctrl+V` 粘贴、`Ctrl+B` 导出配置。
+
+**SSH 会话快捷键：**
+
+| 按键 | 功能 |
+|------|------|
+| `Ctrl+G` / `F12` | 打开传输对话框（复制 scp 命令、上传、下载） |
+| `Esc` / `Ctrl+C` | 取消正在进行的传输 |
+| `Tab` | 自动补全远程路径（下载对话框中） |
+
+**传输流程：**
+1. SSH 会话中按 `Ctrl+G` 或 `F12`
+2. 选择：`1` 复制 scp 命令、`2` 上传本地文件/目录、`3` 下载远程文件/目录
+3. 如上传：确认远程目录（自动检测），输入本地路径，确认后传输
+4. 如下载：输入远程路径（Tab 补全），选择本地保存目录（默认 ~/Downloads），确认后传输
+5. 进度条显示传输速度和剩余时间
+6. 支持单文件和递归目录传输
+
+### 平台兼容性
+
+| 功能 | Linux/macOS 服务器 | Windows 服务器 |
+|------|-------------------|----------------|
+| 上传/下载 | ✅ 完全支持 | ❌ 不支持（请用 scp 命令代替） |
+| Tab 路径补全 | ✅ | ❌ |
+| 自动检测远程目录 | ✅ | ❌ 降级为 home 目录 |
+
+**本地终端说明：**
+- **Windows Terminal** — 完全支持（默认启用 ANSI 转义序列）
+- **老版 cmd.exe** — 界面可能显示异常，建议升级到 Windows Terminal
+- **Termux（Android）** — 完全支持
 
 ### 许可证
 
