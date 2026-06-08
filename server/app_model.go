@@ -748,13 +748,21 @@ func overlayAt(base, overlay string, x, y int) string {
 }
 
 func overlayTopRight(base, overlay string) string {
-	baseWidth, _ := blockSize(base)
-	overlayWidth, _ := blockSize(overlay)
+	baseWidth, baseHeight := blockSize(base)
+	overlayWidth, overlayHeight := blockSize(overlay)
 	x := baseWidth - overlayWidth
 	if x < 0 {
 		x = 0
 	}
-	return overlayAt(base, overlay, x, 0)
+	// Start at row 2 to avoid covering the title bar and first list row.
+	y := 2
+	if y+overlayHeight > baseHeight {
+		y = baseHeight - overlayHeight
+	}
+	if y < 0 {
+		y = 0
+	}
+	return overlayAt(base, overlay, x, y)
 }
 
 func overlayCenter(base, overlay string) string {
