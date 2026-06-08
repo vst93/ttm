@@ -16,6 +16,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	runewidth "github.com/mattn/go-runewidth"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -374,6 +375,47 @@ func (am *AppModel) applyListLocale() {
 	am.langToggleKey.SetHelp("L", "language")
 	am.copySSHKey.SetHelp("y", "ssh cmd")
 	am.uploadKey.SetHelp("Ctrl+G/F12", "upload (SSH)")
+}
+
+// wrapText wraps a (possibly multiline) string to fit within max width per line.
+// Newlines in the input are preserved; each line is soft-wrapped independently.
+func wrapText(s string, maxCols int) string {
+	if maxCols <= 0 {
+		return s
+	}
+	var outLines []string
+	for _, line := range strings.Split(s, "\n") {
+		if runewidth.StringWidth(line) <= maxCols {
+			outLines = append(outLines, line)
+			continue
+		}
+		// Soft-wrap long lines at word boundaries when possible.
+		words := strings.Fields(line)
+		if len(words) == 0 {
+			outLines = append(outLines, line)
+			continue
+		}
+		current := ""
+		for _, w := range words {
+			candidate := current
+			if candidate != "" {
+				candidate += " "
+			}
+			candidate += w
+			if runewidth.StringWidth(candidate) > maxCols {
+				if current != "" {
+					outLines = append(outLines, current)
+				}
+				current = w
+			} else {
+				current = candidate
+			}
+		}
+		if current != "" {
+			outLines = append(outLines, current)
+		}
+	}
+	return strings.Join(outLines, "\n")
 }
 
 func getListSize(width, height int) (int, int) {
@@ -1356,8 +1398,11 @@ func (am *AppModel) buildUpdatePromptOverlay(frameWidth int) string {
 			"  ✓ " + am.t("Update complete! Restart ttm to use the new version.", "更新完成！请重启 ttm 以使用新版本。"),
 		)
 	case dlModelFailed:
+		// Wrap long / multiline error messages so the full fix instructions
+		// are visible in the overlay.
+		wrapped := wrapText(s.dlError, overlayWidth-6)
 		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render(
-			"  ✗ " + s.dlError,
+			"  ✗ " + wrapped,
 		)
 	case dlModelCancelled:
 		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(

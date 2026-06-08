@@ -3,6 +3,7 @@ package server
 import (
 	"archive/zip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -328,13 +330,26 @@ func performUpdate(downloadURL, latest string, onProgress func(float64)) (bool, 
 	//   ttm.current -> ttm.old
 	//   ttm.new     -> ttm.current
 	if err := os.Rename(exePath, oldPath); err != nil {
+		// Check for permission denied and return a friendly message.
+		if isPermissionError(err) {
+			return false, permissionErrorMsg(extractedPath, exePath)
+		}
 		// Fallback: try direct copy if rename fails (e.g. permissions).
 		if err := copyFile(extractedPath, exePath); err != nil {
+			if isPermissionError(err) {
+				return false, permissionErrorMsg(extractedPath, exePath)
+			}
 			os.Remove(extractedPath)
 			return false, fmt.Sprintf("cannot replace binary: %v", err)
 		}
 	} else {
 		if err := os.Rename(extractedPath, exePath); err != nil {
+			// Check for permission denied and return a friendly message.
+			if isPermissionError(err) {
+				// Rollback the first rename.
+				os.Rename(oldPath, exePath)
+				return false, permissionErrorMsg(extractedPath, exePath)
+			}
 			// Rollback.
 			os.Rename(oldPath, exePath)
 			return false, fmt.Sprintf("cannot install new binary: %v", err)
@@ -358,6 +373,35 @@ func copyFile(src, dst string) error {
 	defer out.Close()
 	_, err = io.Copy(out, in)
 	return err
+}
+
+// isPermissionError checks if an error is a permission denied error.
+func isPermissionError(err error) bool {
+	return errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) ||
+		strings.Contains(err.Error(), "permission denied")
+}
+
+// permissionErrorMsg returns a friendly bilingual message telling the user
+// how to manually complete the update when the binary directory is not writable.
+// extractedPath is the path to the downloaded new binary.
+// exePath is the path to the currently running binary.
+func permissionErrorMsg(extractedPath, exePath string) string {
+	method := detectInstallMethod()
+	var fixCmd string
+	switch method {
+	case installMethodBrew:
+		fixCmd = "EN: brew upgrade ttm\nCN: brew upgrade ttm\n  (brew will update automatically / brew 会自动完成更新)"
+	default:
+		fixCmd = fmt.Sprintf("EN: sudo mv %s %s\nCN: sudo mv %s %s\n  (replace binary with sudo / 用 sudo 权限手动替换)", extractedPath, exePath, extractedPath, exePath)
+	}
+	return fmt.Sprintf(
+		"⚠ permission denied: cannot replace %s\n"+
+			"  EN: Admin permission required to update system directory.\n"+
+			"  CN: 需要管理员权限才能更新到系统目录。\n"+
+			"\n"+
+			"  Fix / 解决方法:\n%s",
+		exePath, fixCmd,
+	)
 }
 
 // execCommandExists checks if a command exists in PATH.
