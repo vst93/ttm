@@ -754,8 +754,8 @@ func overlayTopRight(base, overlay string) string {
 	if x < 0 {
 		x = 0
 	}
-	// Start at row 2 to avoid covering the title bar and first list row.
-	y := 2
+	// Start at row 1, right below the title bar.
+	y := 1
 	if y+overlayHeight > baseHeight {
 		y = baseHeight - overlayHeight
 	}
