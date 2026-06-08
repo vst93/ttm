@@ -344,13 +344,19 @@ func performUpdate(downloadURL, latest string, onProgress func(float64)) (bool, 
 	//   ttm.current -> ttm.old
 	//   ttm.new     -> ttm.current
 	if err := os.Rename(exePath, oldPath); err != nil {
-		// Check for permission denied and return needSudo.
+		// Check for permission denied.
 		if isPermissionError(err) {
+			if runtime.GOOS == "windows" {
+				return false, windowsPermissionMsg(exePath), false, "", ""
+			}
 			return false, permissionErrorMsg(extractedPath, exePath), true, extractedPath, exePath
 		}
 		// Fallback: try direct copy if rename fails (e.g. permissions).
 		if err := copyFile(extractedPath, exePath); err != nil {
 			if isPermissionError(err) {
+				if runtime.GOOS == "windows" {
+					return false, windowsPermissionMsg(exePath), false, "", ""
+				}
 				return false, permissionErrorMsg(extractedPath, exePath), true, extractedPath, exePath
 			}
 			os.Remove(extractedPath)
@@ -358,10 +364,13 @@ func performUpdate(downloadURL, latest string, onProgress func(float64)) (bool, 
 		}
 	} else {
 		if err := os.Rename(extractedPath, exePath); err != nil {
-			// Check for permission denied and return needSudo.
+			// Check for permission denied.
 			if isPermissionError(err) {
 				// Rollback the first rename.
 				os.Rename(oldPath, exePath)
+				if runtime.GOOS == "windows" {
+					return false, windowsPermissionMsg(exePath), false, "", ""
+				}
 				return false, permissionErrorMsg(extractedPath, exePath), true, extractedPath, exePath
 			}
 			// Rollback.
@@ -455,4 +464,20 @@ func (p *progressReadCloser) Read(b []byte) (int, error) {
 		}
 	}
 	return n, err
+}
+
+// windowsPermissionMsg returns a friendly message for Windows users when
+// the update fails due to permission denied. Windows has no sudo, so we
+// guide the user to run as admin or manually replace.
+func windowsPermissionMsg(exePath string) string {
+	return fmt.Sprintf(
+		"⚠ permission denied: cannot replace %s\n"+
+			"  EN: The binary is in a protected directory. Please run ttm as Administrator and press U again.\n"+
+			"  CN: 二进制文件位于受保护目录。请以管理员身份运行 ttm 后按 U 更新。\n"+
+			"\n"+
+			"  Fix / 解决方法:\n"+
+			"  1. Right-click ttm → 'Run as administrator', then press U\n"+
+			"     右键 ttm → '以管理员身份运行'，然后按 U 更新",
+		exePath,
+	)
 }
