@@ -7,12 +7,14 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/paginator"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -1107,6 +1109,17 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return am, nil
 	case updateDownloadResultMsg:
 		// Download/replace completed; overlay already reflects status.
+		// If needSudo was detected, dlModelNeedSudo is already set.
+		return am, nil
+	case updateSudoResultMsg:
+		if AM.pendingUpdate != nil {
+			if msg.Success {
+				AM.pendingUpdate.dlStatus = dlModelSudoDone
+			} else {
+				AM.pendingUpdate.dlStatus = dlModelSudoFailed
+				AM.pendingUpdate.sudoOutput = msg.Output
+			}
+		}
 		return am, nil
 	case syncUploadMsg:
 		AM.isSyncing = false
@@ -1251,6 +1264,21 @@ func (am *AppModel) handleUpdatePromptKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
+	// dlModelNeedSudo — password input state.
+	if s.dlStatus == dlModelNeedSudo {
+		return am.handleSudoInputKey(msg)
+	}
+
+	// dlModelSudoDone / dlModelSudoFailed — show result, any key closes.
+	if s.dlStatus == dlModelSudoDone || s.dlStatus == dlModelSudoFailed {
+		switch msg.String() {
+		case "esc", "enter", "q":
+			AM.pendingUpdate = nil
+			return nil
+		}
+		return nil
+	}
+
 	// dlModelSelect — user is choosing action.
 	switch msg.String() {
 	case "esc", "n", "q":
@@ -1269,6 +1297,116 @@ func (am *AppModel) handleUpdatePromptKey(msg tea.KeyMsg) tea.Cmd {
 		return am.startUpdate()
 	}
 	return nil
+}
+
+// handleSudoInputKey handles key presses when the sudo password input is shown.
+func (am *AppModel) handleSudoInputKey(msg tea.KeyMsg) tea.Cmd {
+	s := AM.pendingUpdate
+	if s == nil {
+		return nil
+	}
+
+	switch msg.String() {
+	case "esc":
+		AM.pendingUpdate = nil
+		return nil
+	case "tab":
+		s.needSudoFocus = !s.needSudoFocus
+		if s.needSudoFocus {
+			s.sudoInput.Focus()
+		} else {
+			s.sudoInput.Blur()
+		}
+		return nil
+	case "enter":
+		if s.needSudoFocus {
+			// User pressed enter while focused on password field — submit
+			password := s.sudoInput.Value()
+			if password == "" {
+				return nil
+			}
+			s.sudoPassword = password
+			s.sudoInput.Blur()
+			s.needSudoFocus = false
+			return am.runSudoMv()
+		}
+		// Not focused on input — do nothing (user should tab to input first or use ctrl+enter)
+		return nil
+	case "ctrl+enter", "ctrl+@":
+		// Submit regardless of focus
+		password := s.sudoInput.Value()
+		if password == "" {
+			return nil
+		}
+		s.sudoPassword = password
+		s.sudoInput.Blur()
+		s.needSudoFocus = false
+		return am.runSudoMv()
+	default:
+		if s.needSudoFocus {
+			var cmd tea.Cmd
+			s.sudoInput, cmd = s.sudoInput.Update(msg)
+			return cmd
+		}
+		return nil
+	}
+}
+
+// runSudoMv executes sudo -S mv to replace the binary with the extracted one.
+func (am *AppModel) runSudoMv() tea.Cmd {
+	s := AM.pendingUpdate
+	if s == nil {
+		return nil
+	}
+
+	// First try the reliably stored sudoOutput (extractedPath exePath),
+	// then fall back to parsing from dlError message.
+	extractedPath, exePath := parseSudoPathsFromOutput(s.sudoOutput)
+	if extractedPath == "" || exePath == "" {
+		extractedPath, exePath = parseSudoPaths(s.dlError)
+	}
+	if extractedPath == "" || exePath == "" {
+		s.dlStatus = dlModelSudoFailed
+		s.sudoOutput = am.t("cannot determine binary paths", "无法确定二进制文件路径")
+		return nil
+	}
+
+	password := s.sudoPassword
+	s.dlStatus = dlModelDownloading // reuse "in-progress" visual
+
+	return func() tea.Msg {
+		cmd := exec.Command("sudo", "-S", "mv", extractedPath, exePath)
+		cmd.Stdin = strings.NewReader(password + "\n")
+		out, err := cmd.CombinedOutput()
+		output := strings.TrimSpace(string(out))
+		if err != nil {
+			return updateSudoResultMsg{Success: false, Output: output}
+		}
+		return updateSudoResultMsg{Success: true, Output: output}
+	}
+}
+
+// parseSudoPaths extracts paths from the permission error message line: "sudo mv <src> <dst>"
+func parseSudoPaths(errMsg string) (string, string) {
+	for _, line := range strings.Split(errMsg, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "sudo mv ") {
+			fields := strings.Fields(strings.TrimPrefix(line, "sudo mv "))
+			if len(fields) >= 2 {
+				return fields[0], fields[1]
+			}
+		}
+	}
+	return "", ""
+}
+
+// parseSudoPathsFromOutput extracts paths from the stored "extractedPath exePath" string.
+func parseSudoPathsFromOutput(output string) (string, string) {
+	fields := strings.Fields(output)
+	if len(fields) >= 2 {
+		return fields[0], fields[1]
+	}
+	return "", ""
 }
 
 // startUpdate begins the actual update process based on install method.
@@ -1304,12 +1442,29 @@ func (am *AppModel) startUpdate() tea.Cmd {
 		s.dlStatus = dlModelDownloading
 		s.dlProgress = 0
 		return func() tea.Msg {
-			ok, msg := performUpdate(r.DownloadURL, r.Latest, func(p float64) {
+			ok, msg, needSudo, extractedPath, exePath := performUpdate(r.DownloadURL, r.Latest, func(p float64) {
 				s.dlProgress = p
 			})
 			if ok {
 				s.dlStatus = dlModelDone
 				return updateDownloadResultMsg{Success: true, Output: msg}
+			}
+			if needSudo {
+				// Store paths in dlError for later parsing, transition to sudo state
+				s.dlStatus = dlModelNeedSudo
+				s.dlError = msg // contains the sudo mv command hint
+				// Also store paths directly for reliability
+				s.sudoOutput = fmt.Sprintf("%s %s", extractedPath, exePath)
+				// Initialize password input
+				ti := textinput.New()
+				ti.Placeholder = am.t("sudo password", "sudo 密码")
+				ti.EchoMode = textinput.EchoPassword
+				ti.EchoCharacter = '●'
+				ti.CharLimit = 128
+				ti.Focus()
+				s.sudoInput = ti
+				s.needSudoFocus = true
+				return nil
 			}
 			s.dlStatus = dlModelFailed
 			s.dlError = msg
@@ -1397,6 +1552,18 @@ func (am *AppModel) buildUpdatePromptOverlay(frameWidth int) string {
 		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("78")).Render(
 			"  ✓ " + am.t("Update complete! Restart ttm to use the new version.", "更新完成！请重启 ttm 以使用新版本。"),
 		)
+	case dlModelNeedSudo:
+		// Password input is rendered separately below
+		statusLine = ""
+	case dlModelSudoDone:
+		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("78")).Render(
+			"  ✓ " + am.t("Update complete! Restart ttm to use the new version.", "更新完成！请重启 ttm 以使用新版本。"),
+		)
+	case dlModelSudoFailed:
+		wrapped := wrapText(s.sudoOutput, overlayWidth-6)
+		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render(
+			"  ✗ " + wrapped,
+		)
 	case dlModelFailed:
 		// Wrap long / multiline error messages so the full fix instructions
 		// are visible in the overlay.
@@ -1408,6 +1575,15 @@ func (am *AppModel) buildUpdatePromptOverlay(frameWidth int) string {
 		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(
 			am.t("  Cancelled.", "  已取消。"),
 		)
+	}
+
+	// Password input for sudo
+	passwordInput := ""
+	if s.dlStatus == dlModelNeedSudo {
+		promptLabel := lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true).Render(
+			am.t("  ⚠ Admin permission required. Enter sudo password:", "  ⚠ 需要管理员权限，请输入 sudo 密码："),
+		)
+		passwordInput = promptLabel + "\n  " + s.sudoInput.View()
 	}
 
 	// Action buttons (only show when in select state)
@@ -1437,6 +1613,20 @@ func (am *AppModel) buildUpdatePromptOverlay(frameWidth int) string {
 		help = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
 			am.t("esc to cancel", "esc 取消"),
 		)
+	case dlModelNeedSudo:
+		if s.needSudoFocus {
+			help = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
+				am.t("enter submit · tab switch focus · esc cancel", "enter 提交 · tab 切换焦点 · esc 取消"),
+			)
+		} else {
+			help = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
+				am.t("tab focus password · enter submit · esc cancel", "tab 聚焦密码框 · enter 提交 · esc 取消"),
+			)
+		}
+	case dlModelSudoDone, dlModelSudoFailed:
+		help = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
+			am.t("esc/enter to close", "esc/enter 关闭"),
+		)
 	case dlModelDone, dlModelFailed, dlModelCancelled:
 		help = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
 			am.t("esc/enter to close", "esc/enter 关闭"),
@@ -1456,6 +1646,9 @@ func (am *AppModel) buildUpdatePromptOverlay(frameWidth int) string {
 	}
 	if statusLine != "" {
 		sections = append(sections, "", statusLine)
+	}
+	if passwordInput != "" {
+		sections = append(sections, "", passwordInput)
 	}
 	if buttons != "" {
 		sections = append(sections, "", buttons)

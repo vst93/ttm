@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/charmbracelet/bubbles/textinput"
 )
 
 var Version = "dev"
@@ -68,16 +70,28 @@ const (
 	dlModelDone
 	dlModelFailed
 	dlModelCancelled
+	dlModelNeedSudo
+	dlModelSudoDone
+	dlModelSudoFailed
 )
 
 // updatePromptState holds the interactive update confirmation state.
 type updatePromptState struct {
-	Result     updateCheckResult
-	confirmed  bool
-	selected   int // 0 = default action, 1 = cancel
-	dlStatus   dlModel
-	dlError    string
-	dlProgress float64 // 0.0 ~ 1.0
+	Result        updateCheckResult
+	confirmed     bool
+	selected      int // 0 = default action, 1 = cancel
+	dlStatus      dlModel
+	dlError       string
+	dlProgress    float64 // 0.0 ~ 1.0
+	sudoPassword  string
+	sudoOutput    string
+	sudoInput     textinput.Model
+	needSudoFocus bool // true when password input is focused
+}
+
+type updateSudoResultMsg struct {
+	Success bool
+	Output  string
 }
 
 type updateProgressMsg struct {
@@ -229,16 +243,16 @@ func checkUpdate() updateCheckResult {
 
 // performUpdate downloads the release zip for the current platform,
 // extracts it, and replaces the running binary.
-// Returns (success, message).
+// Returns (success, message, needSudo, extractedPath, exePath).
 // onProgress is called with a value between 0.0 and 1.0 during download.
-func performUpdate(downloadURL, latest string, onProgress func(float64)) (bool, string) {
+func performUpdate(downloadURL, latest string, onProgress func(float64)) (bool, string, bool, string, string) {
 	if downloadURL == "" {
-		return false, "no download URL for this platform"
+		return false, "no download URL for this platform", false, "", ""
 	}
 
 	exePath, err := os.Executable()
 	if err != nil {
-		return false, fmt.Sprintf("cannot locate binary: %v", err)
+		return false, fmt.Sprintf("cannot locate binary: %v", err), false, "", ""
 	}
 	exePath, _ = filepath.EvalSymlinks(exePath)
 
@@ -248,7 +262,7 @@ func performUpdate(downloadURL, latest string, onProgress func(float64)) (bool, 
 
 	out, err := os.Create(zipPath)
 	if err != nil {
-		return false, fmt.Sprintf("cannot create temp file: %v", err)
+		return false, fmt.Sprintf("cannot create temp file: %v", err), false, "", ""
 	}
 
 	httpClient := &http.Client{Timeout: 60 * time.Second}
@@ -256,14 +270,14 @@ func performUpdate(downloadURL, latest string, onProgress func(float64)) (bool, 
 	if err != nil {
 		out.Close()
 		os.Remove(zipPath)
-		return false, fmt.Sprintf("download failed: %v", err)
+		return false, fmt.Sprintf("download failed: %v", err), false, "", ""
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		out.Close()
 		os.Remove(zipPath)
-		return false, fmt.Sprintf("download returned %d", resp.StatusCode)
+		return false, fmt.Sprintf("download returned %d", resp.StatusCode), false, "", ""
 	}
 
 	totalSize := resp.ContentLength
@@ -275,7 +289,7 @@ func performUpdate(downloadURL, latest string, onProgress func(float64)) (bool, 
 	if _, err := io.Copy(out, progressReader); err != nil {
 		out.Close()
 		os.Remove(zipPath)
-		return false, fmt.Sprintf("download interrupted: %v", err)
+		return false, fmt.Sprintf("download interrupted: %v", err), false, "", ""
 	}
 	out.Close()
 
@@ -283,7 +297,7 @@ func performUpdate(downloadURL, latest string, onProgress func(float64)) (bool, 
 	reader, err := zip.OpenReader(zipPath)
 	os.Remove(zipPath)
 	if err != nil {
-		return false, fmt.Sprintf("cannot open zip: %v", err)
+		return false, fmt.Sprintf("cannot open zip: %v", err), false, "", ""
 	}
 	defer reader.Close()
 
@@ -299,26 +313,26 @@ func performUpdate(downloadURL, latest string, onProgress func(float64)) (bool, 
 		// We expect a single file named "ttm" (or "ttm.exe").
 		rc, err := f.Open()
 		if err != nil {
-			return false, fmt.Sprintf("cannot extract: %v", err)
+			return false, fmt.Sprintf("cannot extract: %v", err), false, "", ""
 		}
 		extractedPath = filepath.Join(tmpDir, f.Name)
 		extracted, err := os.OpenFile(extractedPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
 		if err != nil {
 			rc.Close()
-			return false, fmt.Sprintf("cannot write temp binary: %v", err)
+			return false, fmt.Sprintf("cannot write temp binary: %v", err), false, "", ""
 		}
 		_, err = io.Copy(extracted, rc)
 		extracted.Close()
 		rc.Close()
 		if err != nil {
 			os.Remove(extractedPath)
-			return false, fmt.Sprintf("extraction interrupted: %v", err)
+			return false, fmt.Sprintf("extraction interrupted: %v", err), false, "", ""
 		}
 		break // only need the first (and likely only) file
 	}
 
 	if extractedPath == "" {
-		return false, "no binary found in archive"
+		return false, "no binary found in archive", false, "", ""
 	}
 
 	// Replace the running binary.
@@ -330,34 +344,34 @@ func performUpdate(downloadURL, latest string, onProgress func(float64)) (bool, 
 	//   ttm.current -> ttm.old
 	//   ttm.new     -> ttm.current
 	if err := os.Rename(exePath, oldPath); err != nil {
-		// Check for permission denied and return a friendly message.
+		// Check for permission denied and return needSudo.
 		if isPermissionError(err) {
-			return false, permissionErrorMsg(extractedPath, exePath)
+			return false, permissionErrorMsg(extractedPath, exePath), true, extractedPath, exePath
 		}
 		// Fallback: try direct copy if rename fails (e.g. permissions).
 		if err := copyFile(extractedPath, exePath); err != nil {
 			if isPermissionError(err) {
-				return false, permissionErrorMsg(extractedPath, exePath)
+				return false, permissionErrorMsg(extractedPath, exePath), true, extractedPath, exePath
 			}
 			os.Remove(extractedPath)
-			return false, fmt.Sprintf("cannot replace binary: %v", err)
+			return false, fmt.Sprintf("cannot replace binary: %v", err), false, "", ""
 		}
 	} else {
 		if err := os.Rename(extractedPath, exePath); err != nil {
-			// Check for permission denied and return a friendly message.
+			// Check for permission denied and return needSudo.
 			if isPermissionError(err) {
 				// Rollback the first rename.
 				os.Rename(oldPath, exePath)
-				return false, permissionErrorMsg(extractedPath, exePath)
+				return false, permissionErrorMsg(extractedPath, exePath), true, extractedPath, exePath
 			}
 			// Rollback.
 			os.Rename(oldPath, exePath)
-			return false, fmt.Sprintf("cannot install new binary: %v", err)
+			return false, fmt.Sprintf("cannot install new binary: %v", err), false, "", ""
 		}
 		_ = os.Remove(oldPath)
 	}
 
-	return true, "restart ttm to use the new version"
+	return true, "restart ttm to use the new version", false, "", ""
 }
 
 func copyFile(src, dst string) error {
