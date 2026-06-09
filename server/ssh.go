@@ -301,6 +301,10 @@ func (c *defaultClient) Login() error {
 		if !shouldTriggerUploadHint() {
 			return
 		}
+		// Don't trigger if a fullscreen program (vim, less, etc.) is running.
+		if !isRemoteIdle(client) {
+			return
+		}
 		uploadWithDialog(reader, stdinPipe, client, connInfo, currentLocale)
 	}
 

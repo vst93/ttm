@@ -44,7 +44,7 @@ Manage, sync and connect to your servers — all from the terminal.
 - **Update check** — press `u` to check for new releases, with download progress bar
 - **Cross-platform** — macOS, Linux, Windows, Android (Termux)
 - **Copy SSH command** — press `y` to copy the standard SSH command for the selected bookmark (e.g. `ssh user@host -p 22`), with Termux OSC52 fallback; the command is shown in the tip bar for manual copy too
-- **Remote file transfer** — press `Ctrl+G` during an SSH session to upload or download files/directories via SCP protocol (reuses existing connection, no re-authentication; remote path supports Tab completion; downloads default to ~/Downloads with customizable save directory)
+- **Remote file transfer** — double-press `Ctrl+G` during an SSH session to upload or download files/directories via SCP protocol (reuses existing connection, no re-authentication; remote path supports Tab completion; downloads default to ~/Downloads with customizable save directory)
 
 ### Installation
 
@@ -144,12 +144,12 @@ Config directory: `~/.config/ttm/` (Linux), `~/Library/Application Support/ttm/`
 
 | Key | Action |
 |-----|--------|
-| `Ctrl+G` | Open transfer dialog (copy scp command, upload, or download) |
+| `Ctrl+G` ×2 | Open transfer dialog (copy scp command, upload, or download) |
 | `Esc` / `Ctrl+C` | Cancel ongoing transfer |
 | `Tab` | Auto-complete remote path (in download dialog) |
 
 **Transfer dialog flow:**
-1. Press `Ctrl+G` during an SSH session
+1. Double-press `Ctrl+G` during an SSH session
 2. Choose: `1` copy scp command to clipboard, `2` upload local file/directory, `3` download remote file/directory
 3. If uploading: confirm remote directory (auto-detected), enter local path, confirm before transfer
 4. If downloading: enter remote path (Tab to complete), choose local save directory (default ~/Downloads), confirm before transfer
@@ -200,7 +200,7 @@ Config directory: `~/.config/ttm/` (Linux), `~/Library/Application Support/ttm/`
 - **版本检查** — 按 `u` 检查新版本，下载时显示进度条
 - **跨平台** — macOS、Linux、Windows、Android (Termux)
 - **复制 SSH 命令** — 按 `y` 复制选中书签的标准 SSH 命令（如 `ssh user@host -p 22`），兼容 Termux OSC52；命令同时显示在提示栏，支持手动选中复制
-- **远程文件传输** — SSH 会话中按 `Ctrl+G`，可上传或下载文件/目录（SCP 协议，复用已有连接，远程路径支持 Tab 补全，下载默认 ~/Downloads 可自定义）
+- **远程文件传输** — SSH 会话中双击 `Ctrl+G`，可上传或下载文件/目录（SCP 协议，复用已有连接，远程路径支持 Tab 补全，下载默认 ~/Downloads 可自定义）
 
 ### 安装
 
@@ -300,12 +300,12 @@ ttm
 
 | 按键 | 功能 |
 |------|------|
-| `Ctrl+G` | 打开传输对话框（复制 scp 命令、上传、下载） |
+| `Ctrl+G` ×2 | 打开传输对话框（复制 scp 命令、上传、下载） |
 | `Esc` / `Ctrl+C` | 取消正在进行的传输 |
 | `Tab` | 自动补全远程路径（下载对话框中） |
 
 **传输流程：**
-1. SSH 会话中按 `Ctrl+G`
+1. SSH 会话中双击 `Ctrl+G`
 2. 选择：`1` 复制 scp 命令、`2` 上传本地文件/目录、`3` 下载远程文件/目录
 3. 如上传：确认远程目录（自动检测），输入本地路径，确认后传输
 4. 如下载：输入远程路径（Tab 补全），选择本地保存目录（默认 ~/Downloads），确认后传输

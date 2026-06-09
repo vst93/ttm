@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"io"
 	"os"
 	"testing"
 	"time"
@@ -108,7 +107,6 @@ func TestLocaleHelper(t *testing.T) {
 	}
 }
 
-
 func TestCtrlGByteConstant(t *testing.T) {
 	if ctrlGByte != 0x07 {
 		t.Errorf("ctrlGByte = 0x%02x, want 0x07", ctrlGByte)
@@ -200,105 +198,5 @@ func TestTtyProgressThrottling(t *testing.T) {
 	p.Write(make([]byte, 100))
 	if buf.Len() != prevLen {
 		t.Error("expected second write to be throttled")
-	}
-}
-
-// ── processChunk tests ────────────────────────────────────────────────────────
-
-type chunkTestHarness struct {
-	forwarded []byte
-	triggered int
-}
-
-func (h *chunkTestHarness) forward(data []byte) error {
-	h.forwarded = append(h.forwarded, data...)
-	return nil
-}
-
-func (h *chunkTestHarness) handleTrigger(_ io.Reader) {
-	h.triggered++
-}
-
-func TestProcessChunk_NoTriggers(t *testing.T) {
-	h := &chunkTestHarness{}
-	data := []byte("hello world\nls -la\n")
-	r := processChunk(data, h.forward, nil, h.handleTrigger)
-	if r.action != chunkOK {
-		t.Errorf("action = %d, want chunkOK", r.action)
-	}
-	if !bytes.Equal(h.forwarded, data) {
-		t.Errorf("forwarded = %q, want %q", h.forwarded, data)
-	}
-	if h.triggered != 0 {
-		t.Errorf("triggered = %d, want 0", h.triggered)
-	}
-}
-
-func TestProcessChunk_CtrlG(t *testing.T) {
-	h := &chunkTestHarness{}
-	data := []byte{0x07}
-	r := processChunk(data, h.forward, nil, h.handleTrigger)
-	if r.action != chunkOK {
-		t.Errorf("action = %d, want chunkOK", r.action)
-	}
-	if h.triggered != 1 {
-		t.Errorf("triggered = %d, want 1", h.triggered)
-	}
-	if len(h.forwarded) != 0 {
-		t.Errorf("forwarded %d bytes, want 0", len(h.forwarded))
-	}
-}
-
-func TestProcessChunk_CtrlGWithSurroundingData(t *testing.T) {
-	h := &chunkTestHarness{}
-	data := []byte("aaa\x07bbb")
-	r := processChunk(data, h.forward, nil, h.handleTrigger)
-	if r.action != chunkOK {
-		t.Errorf("action = %d, want chunkOK", r.action)
-	}
-	if h.triggered != 1 {
-		t.Errorf("triggered = %d, want 1", h.triggered)
-	}
-	if !bytes.Equal(h.forwarded, []byte("aaabbb")) {
-		t.Errorf("forwarded = %q, want %q", h.forwarded, "aaabbb")
-	}
-}
-
-func TestProcessChunk_MultipleCtrlG(t *testing.T) {
-	h := &chunkTestHarness{}
-	data := []byte("a\x07b\x07c")
-	r := processChunk(data, h.forward, nil, h.handleTrigger)
-	if r.action != chunkOK {
-		t.Errorf("action = %d, want chunkOK", r.action)
-	}
-	if h.triggered != 2 {
-		t.Errorf("triggered = %d, want 2", h.triggered)
-	}
-	if !bytes.Equal(h.forwarded, []byte("abc")) {
-		t.Errorf("forwarded = %q, want %q", h.forwarded, "abc")
-	}
-}
-
-
-
-
-
-
-
-func TestProcessChunk_LargeDataNoTriggers(t *testing.T) {
-	h := &chunkTestHarness{}
-	data := make([]byte, 64*1024)
-	for i := range data {
-		data[i] = 'A' + byte(i%26)
-	}
-	r := processChunk(data, h.forward, nil, h.handleTrigger)
-	if r.action != chunkOK {
-		t.Errorf("action = %d, want chunkOK", r.action)
-	}
-	if !bytes.Equal(h.forwarded, data) {
-		t.Error("forwarded data mismatch")
-	}
-	if h.triggered != 0 {
-		t.Errorf("triggered = %d, want 0", h.triggered)
 	}
 }

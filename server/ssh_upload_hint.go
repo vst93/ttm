@@ -18,6 +18,47 @@ type sshConnInfo struct {
 	Port int
 }
 
+// fullscreenPrograms lists common TUI/fullscreen programs that occupy the
+// terminal. When any of these are running, Ctrl+G should not be intercepted
+// to avoid conflicting with their keybindings.
+var fullscreenPrograms = []string{
+	"vim", "vi", "nvim",
+	"nano", "pico",
+	"less", "more",
+}
+
+// isRemoteIdle checks if the remote SSH server has any fullscreen/TUI program
+// running. Returns true if the remote appears idle (no fullscreen program detected).
+func isRemoteIdle(client *ssh.Client) bool {
+	if client == nil {
+		return true
+	}
+
+	session, err := client.NewSession()
+	if err != nil {
+		return true // assume idle on error
+	}
+	defer session.Close()
+
+	var buf bytes.Buffer
+	session.Stdout = &buf
+
+	// Check each program individually using pgrep.
+	// pgrep returns 0 if a process is found, 1 if not.
+	// We chain them with || so the first match short-circuits.
+	var cmds []string
+	for _, prog := range fullscreenPrograms {
+		cmds = append(cmds, fmt.Sprintf("pgrep -x %q >/dev/null 2>&1", prog))
+	}
+	cmd := strings.Join(cmds, " || ") + " && echo found || true"
+
+	if err := session.Run(cmd); err != nil {
+		return true // assume idle on error
+	}
+
+	return strings.TrimSpace(buf.String()) == ""
+}
+
 // queryRemotePwd gets the interactive shell's cwd by injecting pwd into its stdin.
 // The result is written to a temp file and read back via a new exec session.
 // Returns (dir, detected).
@@ -136,20 +177,15 @@ const ctrlGByte byte = 0x07
 const readBufSize = 32 * 1024
 
 // startStdinCopyWithIntercept is like startStdinCopy but intercepts Ctrl+G
-// (0x07, BEL) to trigger a handler. F12 (ESC [24~) is intentionally NOT
-// intercepted because its escape sequence frequently collides with terminal
-// protocol responses sent by macOS Terminal.app and other terminals during
-// SSH session setup.
+// (0x07, BEL) to trigger a handler.
 //
-// Uses a debounce mechanism to distinguish genuine Ctrl+G keypresses from
-// terminal protocol noise. When a Ctrl+G byte arrives:
-//   - If armed (no recent Ctrl+G): trigger immediately, disarm, start 500ms window
-//   - If in debounce window (noise): forward without triggering, reset window
-//   - After window expires: re-arm for next genuine keypress
-//
-// This works because terminal noise sends 0x07 in rapid bursts (sub-50ms),
-// keeping the debounce window open continuously. After noise stops, the window
-// closes and the user's next Ctrl+G triggers normally.
+// Uses a double-press mechanism to avoid conflicting with vim's Ctrl+G
+// (which shows file info). Behavior:
+//   - Single Ctrl+G: forward to remote (vim shows file info), arm double-press window
+//   - Double Ctrl+G (within window): first press forwarded, second press triggers handler
+//     (NOT forwarded to remote, so vim doesn't see a second Ctrl+G)
+//   - Noise suppression: multiple Ctrl+G in one chunk or rapid bursts (< noiseThreshold)
+//     are forwarded as-is without triggering
 //
 // The handleTrigger callback receives the stdinReader so it can read user
 // input directly (e.g. for a dialog). It is called synchronously, blocking
@@ -160,19 +196,19 @@ func startStdinCopyWithIntercept(stdinPipe io.WriteCloser, handleTrigger func(io
 		return nil, nil, err
 	}
 
-	// debounceWindow is the time window after seeing a Ctrl+G byte during
-	// which subsequent Ctrl+G bytes are considered noise and suppressed.
-	// Terminal protocol noise (macOS Terminal.app) sends 0x07 in rapid
-	// bursts (sub-50ms intervals), so the window resets on each 0x07,
-	// keeping the "noisy" state active. After noise stops (500ms quiet),
-	// the window closes and the next Ctrl+G triggers the upload dialog.
-	const debounceWindow = 500 * time.Millisecond
+	// doublePressWindow is the max time between two Ctrl+G presses to
+	// count as a double-press (trigger upload dialog).
+	const doublePressWindow = 400 * time.Millisecond
+
+	// noiseThreshold is the minimum time between two Ctrl+G presses for
+	// them to be considered a genuine double-press. Presses closer than
+	// this are treated as terminal protocol noise and forwarded as-is.
+	const noiseThreshold = 50 * time.Millisecond
 
 	done := make(chan error, 1)
 	go func() {
 		buf := make([]byte, readBufSize)
-		var lastCtrlG time.Time // time of last forwarded (non-triggering) Ctrl+G
-		ctrlGArmed := true      // true = next Ctrl+G triggers; false = in debounce window
+		var lastCtrlGTime time.Time // time of last Ctrl+G that was forwarded
 
 		forward := func(data []byte) error {
 			if len(data) == 0 {
@@ -189,57 +225,116 @@ func startStdinCopyWithIntercept(stdinPipe io.WriteCloser, handleTrigger func(io
 
 				// Count Ctrl+G bytes in this chunk.
 				ctrlGCount := 0
-				for _, b := range data {
+				ctrlGIdx := -1
+				for i, b := range data {
 					if b == ctrlGByte {
 						ctrlGCount++
+						ctrlGIdx = i
 					}
 				}
 
-				if ctrlGCount > 0 {
-					now := time.Now()
-
-					if !ctrlGArmed {
-						// We're in debounce window — check if it expired.
-						if now.Sub(lastCtrlG) >= debounceWindow {
-							// Window expired. Re-arm.
-							ctrlGArmed = true
+				if ctrlGCount == 2 {
+					// Two Ctrl+G in one chunk — likely a double-press.
+					// Find the position of the second Ctrl+G.
+					secondIdx := -1
+					count := 0
+					for i, b := range data {
+						if b == ctrlGByte {
+							count++
+							if count == 2 {
+								secondIdx = i
+								break
+							}
 						}
 					}
-
-					if ctrlGArmed && ctrlGCount == 1 {
-						// Single Ctrl+G while armed → user pressed Ctrl+G. Trigger!
-						if err := forward(data); err != nil {
+					// Forward everything before the second Ctrl+G,
+					// skip the second Ctrl+G itself, trigger upload.
+					if err := forward(data[:secondIdx]); err != nil {
+						done <- err
+						_ = stdinPipe.Close()
+						return
+					}
+					if secondIdx+1 < len(data) {
+						if err := forward(data[secondIdx+1:]); err != nil {
 							done <- err
 							_ = stdinPipe.Close()
 							return
 						}
-						if handleTrigger != nil {
-							handleTrigger(stdinReader)
-						}
-						// Disarm and start debounce window.
-						ctrlGArmed = false
-						lastCtrlG = now
-						goto checkErr
 					}
+					if handleTrigger != nil {
+						handleTrigger(stdinReader)
+					}
+					lastCtrlGTime = time.Time{}
+					goto checkErr
+				}
 
-					// Multiple Ctrl+G in one chunk, or single while disarmed → noise.
-					// Forward as-is and update debounce timer.
+				if ctrlGCount > 2 {
+					// More than two → terminal noise. Forward as-is.
 					if err := forward(data); err != nil {
 						done <- err
 						_ = stdinPipe.Close()
 						return
 					}
-					lastCtrlG = now
-					ctrlGArmed = false
+					lastCtrlGTime = time.Time{}
 					goto checkErr
 				}
 
-				// No Ctrl+G in this chunk — forward normally.
+				if ctrlGCount == 1 {
+					now := time.Now()
+
+					if !lastCtrlGTime.IsZero() && now.Sub(lastCtrlGTime) < doublePressWindow {
+						// A previous Ctrl+G was recently forwarded. This could be
+						// a double-press or noise.
+						if now.Sub(lastCtrlGTime) < noiseThreshold {
+							// Too fast — likely terminal noise. Forward as-is.
+							if err := forward(data); err != nil {
+								done <- err
+								_ = stdinPipe.Close()
+								return
+							}
+							lastCtrlGTime = time.Time{}
+							goto checkErr
+						}
+
+						// Genuine double-press! Trigger upload dialog.
+						// Forward bytes before and after the Ctrl+G, but NOT the
+						// Ctrl+G itself (so vim doesn't see a second one).
+						if err := forward(data[:ctrlGIdx]); err != nil {
+							done <- err
+							_ = stdinPipe.Close()
+							return
+						}
+						if ctrlGIdx+1 < len(data) {
+							if err := forward(data[ctrlGIdx+1:]); err != nil {
+								done <- err
+								_ = stdinPipe.Close()
+								return
+							}
+						}
+						if handleTrigger != nil {
+							handleTrigger(stdinReader)
+						}
+						lastCtrlGTime = time.Time{} // reset
+						goto checkErr
+					}
+
+					// First Ctrl+G press — forward to remote, arm double-press window.
+					if err := forward(data); err != nil {
+						done <- err
+						_ = stdinPipe.Close()
+						return
+					}
+					lastCtrlGTime = now
+					goto checkErr
+				}
+
+				// No Ctrl+G in this chunk — forward normally, reset state.
 				if err := forward(data); err != nil {
 					done <- err
 					_ = stdinPipe.Close()
 					return
 				}
+				lastCtrlGTime = time.Time{}
 			}
 		checkErr:
 			if readErr != nil {
@@ -258,49 +353,6 @@ func startStdinCopyWithIntercept(stdinPipe io.WriteCloser, handleTrigger func(io
 		cancelStdinReader(stdinReader)
 	}
 	return done, cancel, nil
-}
-
-// chunkResult describes what processChunk did.
-type chunkResult struct {
-	action chunkAction
-}
-
-type chunkAction int
-
-const (
-	chunkOK        chunkAction = iota // all bytes forwarded
-	chunkTriggered                    // handler was called
-	chunkDone                         // error occurred, caller should stop
-)
-
-// processChunk scans a chunk of stdin data for Ctrl+G (0x07) and forwards
-// all other data to the SSH pipe. F12 escape sequence interception was
-// removed because it frequently collides with terminal protocol responses.
-func processChunk(data []byte, forward func([]byte) error, stdinReader io.Reader, handleTrigger func(io.Reader)) chunkResult {
-	i := 0
-	for i < len(data) {
-		b := data[i]
-
-		// ── Ctrl+G (0x07): single-press trigger ──
-		if b == ctrlGByte {
-			if err := forward(data[:i]); err != nil {
-				return chunkResult{action: chunkDone}
-			}
-			if handleTrigger != nil {
-				handleTrigger(stdinReader)
-			}
-			data = data[i+1:]
-			i = 0
-			continue
-		}
-
-		i++
-	}
-
-	if err := forward(data); err != nil {
-		return chunkResult{action: chunkDone}
-	}
-	return chunkResult{action: chunkOK}
 }
 
 // ── Debounce ──────────────────────────────────────────────────────────────────
