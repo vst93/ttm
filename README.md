@@ -54,28 +54,33 @@ Manage, sync and connect to your servers — all from the terminal.
 brew install vst93/tap/ttm
 ```
 
-**Shell script (macOS / Linux):**
+**Shell script (macOS / Linux / Termux):**
 
 ```bash
-curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && bash install.sh
+curl -fsSL https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh | bash
 ```
 
-Options: `--help` to show installer flags, `INSTALL_DIR="$HOME/.local/bin"` for custom path, `AUTO_DELETE_INSTALL_SCRIPT=0` to keep the script, `FORCE_INSTALL=1` to skip checksum verification.
+**China mirror:**
+
+```bash
+curl -fsSL https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.sh | bash
+```
+
+| Option | Description |
+|--------|-------------|
+| `--help` | Show all options |
+| `--lang en` | Use English (default) |
+| `--lang zh` | 使用中文 |
+| `--install-dir <dir>` | Install to custom directory |
+| `--force` | Continue even if checksum fails |
 
 **Windows:** Download `ttm-windows-*.zip` from [Releases](https://github.com/vst93/ttm/releases), extract `ttm.exe`, add to `PATH`.
-
-**Termux (Android):**
-
-```bash
-pkg update && pkg install curl unzip
-curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && bash install.sh
-```
 
 **Build from source:**
 
 ```bash
 git clone https://github.com/vst93/ttm.git && cd ttm
-make build   # or: go build -o ttm .
+make build
 ```
 
 ### Quick Start
@@ -210,28 +215,33 @@ Config directory: `~/.config/ttm/` (Linux), `~/Library/Application Support/ttm/`
 brew install vst93/tap/ttm
 ```
 
-**脚本安装（macOS / Linux）：**
+**脚本安装（macOS / Linux / Termux）：**
 
 ```bash
-curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && bash install.sh
+curl -fsSL https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh | bash
 ```
 
-可选参数：`--help` 查看安装参数、`INSTALL_DIR="$HOME/.local/bin"` 自定义路径、`AUTO_DELETE_INSTALL_SCRIPT=0` 保留脚本、`FORCE_INSTALL=1` 跳过校验。
+**国内加速：**
+
+```bash
+curl -fsSL https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.sh | bash
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--help` | 显示所有选项 |
+| `--lang en` | 使用英文（默认） |
+| `--lang zh` | 使用中文 |
+| `--install-dir <dir>` | 安装到指定目录 |
+| `--force` | 校验失败时继续安装 |
 
 **Windows：** 从 [Releases](https://github.com/vst93/ttm/releases) 下载 `ttm-windows-*.zip`，解压 `ttm.exe`，添加到 `PATH`。
-
-**Termux（Android）：**
-
-```bash
-pkg update && pkg install curl unzip
-curl -fsSL -o install.sh https://raw.githubusercontent.com/vst93/ttm/refs/heads/main/cmd/install.sh && bash install.sh
-```
 
 **从源码构建：**
 
 ```bash
 git clone https://github.com/vst93/ttm.git && cd ttm
-make build   # 或：go build -o ttm .
+make build
 ```
 
 ### 快速开始
