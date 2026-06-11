@@ -57,10 +57,10 @@ SPINNER_FRAMES=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
 spinner_start() {
     local msg="$1"
     local i=0
-    # Run spinner in background
+    # Run spinner in background (output to stderr to avoid polluting stdout)
     (
         while true; do
-            printf "\r  ${CYN}%s${R} %s" "${SPINNER_FRAMES[i]}" "$msg"
+            printf "\r  ${CYN}%s${R} %s" "${SPINNER_FRAMES[i]}" "$msg" >&2
             i=$(( (i + 1) % ${#SPINNER_FRAMES[@]} ))
             sleep 0.1
         done
@@ -74,9 +74,9 @@ spinner_stop() {
         wait "$SPINNER_PID" 2>/dev/null || true
         SPINNER_PID=""
     fi
-    # Only clear line if stdout is a terminal
-    if [ -t 1 ]; then
-        printf "\r\033[K"
+    # Only clear line if stderr is a terminal
+    if [ -t 2 ]; then
+        printf "\r\033[K" >&2
     fi
 }
 
