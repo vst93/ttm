@@ -95,6 +95,19 @@ irm https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.ps1 | iex
 | `TTM_LANG=zh` | Use Chinese interface |
 | `NO_SHORTCUTS=1` | Skip creating desktop/start menu shortcuts |
 
+> **Tip:** If GitHub access is limited in your region, use `SKIP_GITHUB=1` to skip direct GitHub downloads and use CDN mirrors instead.
+
+**CDN Mirror (jsdelivr):**
+The installation script uses `cdn.jsdelivr.net` as a CDN mirror for faster downloads in regions with limited GitHub access. You can also use the CDN mirror directly:
+
+```powershell
+# Use CDN mirror for installation
+irm https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.ps1 | iex
+
+# Or with options
+$env:SKIP_GITHUB=1; $env:TTM_LANG="zh"; irm https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.ps1 | iex
+```
+
 Example with options:
 
 ```powershell
@@ -282,6 +295,19 @@ irm https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.ps1 | iex
 | `INSTALL_DIR=path` | 安装到指定目录 |
 | `TTM_LANG=zh` | 使用中文界面 |
 | `NO_SHORTCUTS=1` | 不创建桌面/开始菜单快捷方式 |
+
+> **提示：** 如果您所在地区 GitHub 访问受限，建议使用 `SKIP_GITHUB=1` 跳过 GitHub 直连下载，仅使用 CDN 镜像。
+
+**CDN 镜像 (jsdelivr)：**
+安装脚本使用 `cdn.jsdelivr.net` 作为 CDN 镜像，在 GitHub 访问受限的地区可获得更快的下载速度。您也可以直接使用 CDN 镜像：
+
+```powershell
+# 使用 CDN 镜像安装
+irm https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.ps1 | iex
+
+# 或带参数
+$env:SKIP_GITHUB=1; $env:TTM_LANG="zh"; irm https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.ps1 | iex
+```
 
 带参数示例：
 
