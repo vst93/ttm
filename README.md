@@ -74,7 +74,19 @@ curl -fsSL https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.sh | bash
 | `--install-dir <dir>` | Install to custom directory |
 | `--force` | Continue even if checksum fails |
 
-**Windows:** Download `ttm-windows-*.zip` from [Releases](https://github.com/vst93/ttm/releases), extract `ttm.exe`, add to `PATH`.
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/vst93/ttm/main/cmd/install.ps1 | iex
+```
+
+Or with CDN mirror (faster in China):
+
+```powershell
+irm https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.ps1 | iex
+```
+
+Or download `ttm-windows-*.zip` from [Releases](https://github.com/vst93/ttm/releases), extract `ttm.exe`, add to `PATH`.
 
 **Build from source:**
 
@@ -235,7 +247,19 @@ curl -fsSL https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.sh | bash
 | `--install-dir <dir>` | 安装到指定目录 |
 | `--force` | 校验失败时继续安装 |
 
-**Windows：** 从 [Releases](https://github.com/vst93/ttm/releases) 下载 `ttm-windows-*.zip`，解压 `ttm.exe`，添加到 `PATH`。
+**Windows (PowerShell)：**
+
+```powershell
+irm https://raw.githubusercontent.com/vst93/ttm/main/cmd/install.ps1 | iex
+```
+
+国内镜像：
+
+```powershell
+irm https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.ps1 | iex
+```
+
+或从 [Releases](https://github.com/vst93/ttm/releases) 下载 `ttm-windows-*.zip`，解压 `ttm.exe`，添加到 `PATH`。
 
 **从源码构建：**
 
