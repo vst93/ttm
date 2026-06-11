@@ -73,6 +73,7 @@ curl -fsSL https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.sh | bash
 | `--lang zh` | 使用中文 |
 | `--install-dir <dir>` | Install to custom directory |
 | `--force` | Continue even if checksum fails |
+| `--skip-github` | Skip GitHub direct download, use mirrors only |
 
 **Windows (PowerShell):**
 
@@ -84,6 +85,20 @@ Or with CDN mirror (faster in China):
 
 ```powershell
 irm https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.ps1 | iex
+```
+
+| Environment Variable | Description |
+|---------------------|-------------|
+| `SKIP_GITHUB=1` | Skip GitHub direct download, use mirrors only |
+| `FORCE_INSTALL=1` | Continue even if checksum fails |
+| `INSTALL_DIR=path` | Install to custom directory |
+| `TTM_LANG=zh` | Use Chinese interface |
+| `NO_SHORTCUTS=1` | Skip creating desktop/start menu shortcuts |
+
+Example with options:
+
+```powershell
+$env:SKIP_GITHUB=1; $env:TTM_LANG="zh"; irm https://raw.githubusercontent.com/vst93/ttm/main/cmd/install.ps1 | iex
 ```
 
 Or download `ttm-windows-*.zip` from [Releases](https://github.com/vst93/ttm/releases), extract `ttm.exe`, add to `PATH`.
@@ -246,6 +261,7 @@ curl -fsSL https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.sh | bash
 | `--lang zh` | 使用中文 |
 | `--install-dir <dir>` | 安装到指定目录 |
 | `--force` | 校验失败时继续安装 |
+| `--skip-github` | 跳过 GitHub 直连，仅使用镜像下载 |
 
 **Windows (PowerShell)：**
 
@@ -257,6 +273,20 @@ irm https://raw.githubusercontent.com/vst93/ttm/main/cmd/install.ps1 | iex
 
 ```powershell
 irm https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.ps1 | iex
+```
+
+| 环境变量 | 说明 |
+|----------|------|
+| `SKIP_GITHUB=1` | 跳过 GitHub 直连，仅使用镜像下载 |
+| `FORCE_INSTALL=1` | 校验失败时继续安装 |
+| `INSTALL_DIR=path` | 安装到指定目录 |
+| `TTM_LANG=zh` | 使用中文界面 |
+| `NO_SHORTCUTS=1` | 不创建桌面/开始菜单快捷方式 |
+
+带参数示例：
+
+```powershell
+$env:SKIP_GITHUB=1; $env:TTM_LANG="zh"; irm https://raw.githubusercontent.com/vst93/ttm/main/cmd/install.ps1 | iex
 ```
 
 或从 [Releases](https://github.com/vst93/ttm/releases) 下载 `ttm-windows-*.zip`，解压 `ttm.exe`，添加到 `PATH`。

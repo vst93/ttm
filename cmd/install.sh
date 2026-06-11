@@ -8,6 +8,7 @@ BINARY_NAME="ttm"
 REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}"
 API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest"
 FORCE_INSTALL="${FORCE_INSTALL:-0}"
+SKIP_GITHUB="${SKIP_GITHUB:-0}"
 AUTO_DELETE_INSTALL_SCRIPT="${AUTO_DELETE_INSTALL_SCRIPT:-1}"
 
 GITHUB_MIRRORS=(
@@ -143,10 +144,12 @@ ${B}Options:${R}
   ${GRN}    --install-dir${R} <dir> $(t "Override install dir" "覆盖安装目录")
   ${GRN}    --force${R}             $(t "Force install on checksum fail" "校验失败时强制安装")
   ${GRN}    --lang${R} <en|zh>      $(t "Set language" "设置语言")
+  ${GRN}    --skip-github${R}       $(t "Skip GitHub direct download, use mirrors only" "跳过 GitHub 直连下载，仅使用镜像")
 
 ${B}Env vars:${R}
   ${YLW}INSTALL_DIR${R}             $(t "Same as --install-dir" "等同于 --install-dir")
   ${YLW}FORCE_INSTALL${R}=1         $(t "Same as --force" "等同于 --force")
+  ${YLW}SKIP_GITHUB${R}=1           $(t "Same as --skip-github" "等同于 --skip-github")
   ${YLW}TTM_LANG${R}=en|zh          $(t "Set language" "设置语言")
 EOF
 }
@@ -159,13 +162,14 @@ parse_args() {
                 [ "$#" -lt 2 ] && { log_error "$(t "--install-dir requires argument" "--install-dir 需要参数")"; exit 2; }
                 INSTALL_DIR="$2"; shift ;;
             --force) FORCE_INSTALL="1" ;;
+            --skip-github) SKIP_GITHUB="1" ;;
             --lang)
                 [ "$#" -lt 2 ] && { log_error "$(t "--lang requires value: en|zh" "--lang 需要值: en|zh")"; exit 2; }
                 case "$2" in en|zh) LANG="$2" ;; *) log_error "$(t "Invalid: $2" "无效: $2")"; exit 2 ;; esac
                 shift ;;
             *)
                 log_error "$(t "Unknown option: $1" "未知参数: $1")"
-                log_error "$(t "Available: --help, --install-dir, --force, --lang" "可用: --help, --install-dir, --force, --lang")"
+                log_error "$(t "Available: --help, --install-dir, --force, --skip-github, --lang" "可用: --help, --install-dir, --force, --skip-github, --lang")"
                 exit 2 ;;
         esac
         shift
@@ -306,8 +310,10 @@ download_file() {
 download_with_mirrors() {
     local original_url="$1" output_file="$2"
 
-    log_info "$(t "Trying direct..." "尝试直连...")" >&2
-    download_file "$original_url" "$output_file" && return 0
+    if [ "$SKIP_GITHUB" != "1" ]; then
+        log_info "$(t "Trying direct..." "尝试直连...")" >&2
+        download_file "$original_url" "$output_file" && return 0
+    fi
 
     for mirror in "${GITHUB_MIRRORS[@]}"; do
         log_warn "$(t "Trying mirror: $mirror" "尝试镜像: $mirror")" >&2
