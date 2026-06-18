@@ -1,13 +1,13 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -37,13 +37,12 @@ func showActionMenu(tty io.Writer, stdinReader io.Reader, loc locale) (uploadAct
 	fmt.Fprintf(tty, "  \x1b[33m3)\x1b[0m %s\r\n", opt3)
 	fmt.Fprintf(tty, "\r\n  %s: ", hint)
 
-	buf := make([]byte, 1)
 	for {
-		n, err := stdinReader.Read(buf)
-		if n != 1 || err != nil {
+		b, ok := readSignificantByte(stdinReader)
+		if !ok {
 			continue
 		}
-		switch buf[0] {
+		switch b {
 		case '1':
 			fmt.Fprintf(tty, "1\r\n")
 			return uploadActionCopy, true
@@ -53,7 +52,7 @@ func showActionMenu(tty io.Writer, stdinReader io.Reader, loc locale) (uploadAct
 		case '3':
 			fmt.Fprintf(tty, "3\r\n")
 			return uploadActionDownload, true
-		case 0x1B, 0x03: // Escape or Ctrl+C
+		case 0x1B, 0x03: // Escape or Ctrl+C (standalone Esc; OSC/CSI responses are drained)
 			cancelMsg := localeT(loc, "cancelled", "已取消")
 			fmt.Fprintf(tty, "\r\n\x1b[2m%s\x1b[0m\r\n", cancelMsg)
 			return 0, false
@@ -71,11 +70,13 @@ func readInputLine(tty io.Writer, stdinReader io.Reader, defaultVal string) stri
 
 	buf := make([]byte, 1)
 	for {
-		n, err := stdinReader.Read(buf)
-		if n != 1 || err != nil {
+		// First byte via readSignificantByte so terminal escape sequences
+		// (OSC/CSI responses from starship/oh-my-zsh) are drained instead
+		// of polluting the input field. A standalone Esc cancels.
+		b, ok := readSignificantByte(stdinReader)
+		if !ok {
 			continue
 		}
-		b := buf[0]
 
 		// Determine UTF-8 sequence length from first byte.
 		var seqLen int
@@ -179,11 +180,12 @@ func readRemotePath(tty io.Writer, stdinReader io.Reader, client *ssh.Client, de
 
 	buf := make([]byte, 1)
 	for {
-		n, err := stdinReader.Read(buf)
-		if n != 1 || err != nil {
+		// First byte via readSignificantByte so terminal escape sequences
+		// are drained (Tab/path input is not polluted by OSC/CSI responses).
+		b, ok := readSignificantByte(stdinReader)
+		if !ok {
 			continue
 		}
-		b := buf[0]
 
 		// Determine UTF-8 sequence length.
 		var seqLen int
@@ -301,29 +303,23 @@ func remoteTabComplete(client *ssh.Client, input string) (string, []string) {
 		prefix = ""
 	}
 
-	// Query remote server for completions.
-	session, err := client.NewSession()
+	// Query remote server for all entries, then filter by prefix in Go.
+	// Fetching the full listing (instead of `ls | grep` remotely) keeps the
+	// command shell-agnostic (runs under /bin/sh via remoteRunSh) and avoids
+	// regex/quoting pitfalls when the prefix contains special characters.
+	out, err := remoteRunSh(client, "ls -1a "+shQuote(dir)+" 2>/dev/null", 5*time.Second)
 	if err != nil {
 		return input, nil
 	}
-	defer session.Close()
 
-	var buf bytes.Buffer
-	session.Stdout = &buf
-	// List entries matching prefix.
-	cmd := fmt.Sprintf("ls -1a %q 2>/dev/null", dir)
-	if prefix != "" {
-		cmd = fmt.Sprintf("ls -1a %q 2>/dev/null | grep '^%s'", dir, prefix)
-	}
-	if err := session.Run(cmd); err != nil {
-		return input, nil
-	}
-
-	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	lines := strings.Split(out, "\n")
 	var matches []string
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || line == "." || line == ".." {
+			continue
+		}
+		if prefix != "" && !strings.HasPrefix(line, prefix) {
 			continue
 		}
 		matches = append(matches, line)
@@ -355,18 +351,11 @@ func remoteTabComplete(client *ssh.Client, input string) (string, []string) {
 
 // isRemoteDir checks if a remote path is a directory.
 func isRemoteDir(client *ssh.Client, path string) bool {
-	session, err := client.NewSession()
+	out, err := remoteRunSh(client, "test -d "+shQuote(path)+" && echo yes", 5*time.Second)
 	if err != nil {
 		return false
 	}
-	defer session.Close()
-
-	var buf bytes.Buffer
-	session.Stdout = &buf
-	if err := session.Run(fmt.Sprintf("test -d %q && echo yes", path)); err != nil {
-		return false
-	}
-	return strings.TrimSpace(buf.String()) == "yes"
+	return out == "yes"
 }
 
 // uniqueLocalPath returns a path that doesn't exist yet by appending a number.
@@ -421,17 +410,26 @@ func showUploadInputs(tty io.Writer, stdinReader io.Reader, defaultRemoteDir str
 	return remoteDir, localPath, true
 }
 
-// uploadWithDialog runs the full interactive flow: menu → action.
-func uploadWithDialog(stdinReader io.Reader, stdinPipe io.WriteCloser, client *ssh.Client, info sshConnInfo, loc locale) {
-	remoteDir, dirDetected := queryRemotePwd(stdinPipe, client)
-
-	tty, err := openLocalTTY()
-	if err != nil {
-		return
+// openDialogTTY opens the controlling terminal for dialog output, falling
+// back to stdout if /dev/tty (or CON) is unavailable. Returns a writer and a
+// closer that must be called when done. The fallback ensures the menu is
+// still shown when there is no controlling terminal.
+func openDialogTTY() (io.Writer, func()) {
+	if f, err := openLocalTTY(); err == nil {
+		return f, func() { f.Close() }
 	}
-	defer tty.Close()
+	return os.Stdout, func() {}
+}
+
+// uploadWithDialog runs the full interactive flow: menu → action.
+// The tty writer is provided by the caller (opened up front for instant
+// feedback) so the dialog does not depend on a second openLocalTTY call.
+func uploadWithDialog(stdinReader io.Reader, stdinPipe io.WriteCloser, client *ssh.Client, info sshConnInfo, loc locale, tty io.Writer) {
+	remoteDir, dirDetected := queryRemotePwd(stdinPipe, client)
+	debugf("dialog: cwd=%q detected=%v", remoteDir, dirDetected)
 
 	action, ok := showActionMenu(tty, stdinReader, loc)
+	debugf("dialog: menu action=%v ok=%v", action, ok)
 	if !ok {
 		return
 	}
@@ -522,17 +520,16 @@ func confirmTransfer(tty io.Writer, stdinReader io.Reader, summary string, loc l
 	fmt.Fprintf(tty, "%s", summary)
 	fmt.Fprintf(tty, "  %s", confirmHint)
 
-	buf := make([]byte, 1)
 	for {
-		n, err := stdinReader.Read(buf)
-		if n != 1 || err != nil {
+		b, ok := readSignificantByte(stdinReader)
+		if !ok {
 			continue
 		}
-		switch buf[0] {
+		switch b {
 		case 'y', 'Y', '\r', '\n': // confirm
 			fmt.Fprintf(tty, "y\r\n")
 			return true
-		case 'n', 'N', 0x1B, 0x03: // cancel
+		case 'n', 'N', 0x1B, 0x03: // cancel (standalone Esc; OSC/CSI drained)
 			fmt.Fprintf(tty, "n\r\n")
 			fmt.Fprintf(tty, "\x1b[2m%s\x1b[0m\r\n", cancelMsg)
 			return false
@@ -557,7 +554,10 @@ func handleFileUpload(tty io.Writer, stdinReader io.Reader, client *ssh.Client, 
 		progressLabel, filepath.Base(localPath), formatFileSize(size), info.Host, remoteDir, cancelHint)
 
 	progress := &ttyProgress{tty: tty, total: size, loc: loc}
+	stopTicker := progress.startLiveRenderer()
 	uploadErr := scpUploadFile(ctx, client, remoteDir, localPath, progress)
+	stopTicker()
+	progress.render()
 	fmt.Fprintf(tty, "\r\n")
 
 	if uploadErr != nil {
@@ -618,8 +618,11 @@ func handleDirUpload(tty io.Writer, stdinReader io.Reader, client *ssh.Client, i
 		upLabel, dirName, totalFiles, fileLabel, formatFileSize(totalSize), cancelHint)
 
 	// Start recursive upload.
-	progress := &dirProgress{tty: tty, total: totalFiles, loc: loc}
+	progress := &dirProgress{tty: tty, total: totalFiles, totalBytes: totalSize, loc: loc}
+	stopTicker := progress.startLiveRenderer()
 	uploadErr := scpUploadDir(ctx, client, remoteDir, localDir, progress)
+	stopTicker()
+	progress.render()
 	fmt.Fprintf(tty, "\r\n")
 
 	if uploadErr != nil {
@@ -647,49 +650,62 @@ func printEndBanner(tty io.Writer, loc locale) {
 
 // ── Cancel support ────────────────────────────────────────────────────────────
 
-// startCancelListener intercepts stdin during upload to detect cancel keys.
-// Returns a stop function that MUST be called when the upload finishes.
+// startCancelListener watches stdin during an upload/download for cancel
+// keys (standalone Esc or Ctrl+C). It drains terminal escape sequences
+// (OSC/CSI responses) so they neither falsely trigger cancel nor leak to the
+// remote shell afterward.
+//
+// Unlike a plain blocking Read, it polls stdin in short slices so the stop
+// function can terminate it promptly — the previous pipe-based version could
+// block forever on a Read with no input, deadlocking stop().
 func startCancelListener(stdinReader io.Reader, cancel context.CancelFunc) (stop func()) {
-	pr, pw := io.Pipe()
-	copyDone := make(chan struct{})
+	stopCh := make(chan struct{})
+	done := make(chan struct{})
 
-	// Goroutine: copy stdin bytes to the pipe.
 	go func() {
-		defer close(copyDone)
-		buf := make([]byte, 1)
+		defer close(done)
 		for {
-			n, err := stdinReader.Read(buf)
-			if n > 0 {
-				if _, werr := pw.Write(buf[:n]); werr != nil {
+			b, ok := readByteOrStop(stdinReader, stopCh)
+			if !ok {
+				return // stop closed or reader ended
+			}
+			if b == 0x1b {
+				// Disambiguate standalone Esc (cancel) from an escape sequence.
+				next, ok := peekByte(stdinReader, escPeekTimeout, stdinReadable)
+				if !ok {
+					debugf("cancel: standalone Esc -> cancel")
+					cancel()
 					return
 				}
+				switch next {
+				case ']':
+					drainOSC(stdinReader, stdinReadable)
+				case '[':
+					// Parse kitty-keyboard CSI-u in case the local kitty disable
+					// didn't take effect: Esc=ESC[27u, Ctrl+C=ESC[3;5u.
+					seq := readCSIReturning(stdinReader, stdinReadable)
+					if kb, kok := parseKittyKey(seq); kok && (kb == 0x1b || kb == 0x03) {
+						debugf("cancel: kitty-encoded key 0x%02x -> cancel", kb)
+						cancel()
+						return
+					}
+				case 'O':
+					drainN(stdinReader, 1, stdinReadable)
+				}
+				continue
 			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-
-	// Goroutine: read from pipe, detect cancel keys.
-	go func() {
-		defer pr.Close()
-		buf := make([]byte, 1)
-		for {
-			n, err := pr.Read(buf)
-			if n == 1 && (buf[0] == 0x1B || buf[0] == 0x03) {
+			if b == 0x03 { // Ctrl+C
+				debugf("cancel: Ctrl+C -> cancel")
 				cancel()
 				return
 			}
-			if err != nil {
-				return
-			}
+			// Other key bytes (typing) are ignored during transfer.
 		}
 	}()
 
-	// Stop function: close pipe write end and wait for copy goroutine.
 	return func() {
-		pw.Close()
-		<-copyDone
+		close(stopCh)
+		<-done
 	}
 }
 
@@ -705,10 +721,12 @@ type ttyProgress struct {
 	speed       float64 // smoothed speed (bytes/sec)
 	startTime   time.Time
 	loc         locale
+	mu          sync.Mutex // guards written/render state (Write vs live ticker)
 }
 
 func (p *ttyProgress) Write(data []byte) (int, error) {
 	n := len(data)
+	p.mu.Lock()
 	p.written += int64(n)
 
 	if p.startTime.IsZero() {
@@ -717,6 +735,7 @@ func (p *ttyProgress) Write(data []byte) (int, error) {
 
 	now := time.Now()
 	if now.Sub(p.lastUpd) < 100*time.Millisecond && p.written < p.total {
+		p.mu.Unlock()
 		return n, nil
 	}
 
@@ -735,11 +754,19 @@ func (p *ttyProgress) Write(data []byte) (int, error) {
 	}
 	p.lastWritten = p.written
 	p.lastUpd = now
-	p.render()
+	p.renderLocked()
+	p.mu.Unlock()
 	return n, nil
 }
 
+// render redraws the progress bar (thread-safe).
 func (p *ttyProgress) render() {
+	p.mu.Lock()
+	p.renderLocked()
+	p.mu.Unlock()
+}
+
+func (p *ttyProgress) renderLocked() {
 	pct := 0
 	if p.total > 0 {
 		pct = int(p.written * 100 / p.total)
@@ -766,31 +793,115 @@ func (p *ttyProgress) render() {
 	}
 }
 
-// dirProgress tracks upload progress for a directory (file count).
+// startLiveRenderer spawns a goroutine that redraws the bar every 150ms so the
+// progress stays live even when Write is throttled or blocked on SSH flow
+// control (previously the bar could freeze at 0% when stdin.Write stalled).
+// Returns a stop func that MUST be called when the transfer ends.
+func (p *ttyProgress) startLiveRenderer() (stop func()) {
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(150 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				p.render()
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+// dirProgress tracks upload/download progress for a directory.
+//
+// It tracks BOTH file count (current/total) and bytes (written/totalBytes) so
+// the live ticker can show real-time progress during large-file transfers —
+// previously the bar only advanced when a whole file finished, so it appeared
+// frozen while a big file streamed in (io.CopyN blocked between updates).
 type dirProgress struct {
-	tty      io.Writer
-	total    int
-	current  int
-	lastFile string
-	loc      locale
+	tty        io.Writer
+	total      int   // total file count (may be 0 if count failed)
+	totalBytes int64 // total size of all files (may be 0 if count failed)
+	current    int   // files completed
+	written    int64 // bytes received so far (across all files)
+	lastFile   string
+	loc        locale
+	mu         sync.Mutex
+}
+
+// addBytes advances the byte counter (called as file data streams in).
+func (p *dirProgress) addBytes(n int) {
+	p.mu.Lock()
+	p.written += int64(n)
+	p.mu.Unlock()
 }
 
 func (p *dirProgress) update(filename string) {
+	p.mu.Lock()
 	p.current++
 	p.lastFile = filename
+	p.renderLocked()
+	p.mu.Unlock()
+}
 
+// render redraws the directory progress (thread-safe).
+func (p *dirProgress) render() {
+	p.mu.Lock()
+	p.renderLocked()
+	p.mu.Unlock()
+}
+
+func (p *dirProgress) renderLocked() {
 	barWidth := 20
-	filled := p.current * barWidth / p.total
+	var filled int
+	// Prefer byte-based fill when a total size is known (smooth during large
+	// files); fall back to file-count fill; else empty bar.
+	if p.totalBytes > 0 {
+		filled = int(p.written * int64(barWidth) / p.totalBytes)
+	} else if p.total > 0 {
+		filled = p.current * barWidth / p.total
+	}
+	if filled > barWidth {
+		filled = barWidth
+	}
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
 
+	filename := p.lastFile
 	// Truncate long filenames by rune (not byte) to avoid breaking UTF-8.
 	runes := []rune(filename)
 	if len(runes) > 30 {
 		filename = "..." + string(runes[len(runes)-27:])
 	}
 
-	fmt.Fprintf(p.tty, "\r\x1b[K  %s %d/%d  %s",
-		bar, p.current, p.total, filename)
+	// Show byte progress when known, plus file count; otherwise just count.
+	if p.totalBytes > 0 {
+		fmt.Fprintf(p.tty, "\r\x1b[K  %s %s/%s  %d/%d  %s",
+			bar, formatFileSize(p.written), formatFileSize(p.totalBytes), p.current, p.total, filename)
+	} else {
+		fmt.Fprintf(p.tty, "\r\x1b[K  %s %d/%d  %s",
+			bar, p.current, p.total, filename)
+	}
+}
+
+// startLiveRenderer spawns a goroutine that redraws every 150ms so directory
+// progress stays live between file completions. Returns a stop func.
+func (p *dirProgress) startLiveRenderer() (stop func()) {
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(150 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				p.render()
+			}
+		}
+	}()
+	return func() { close(done) }
 }
 
 func formatDuration(d time.Duration) string {
@@ -865,7 +976,9 @@ func scpUploadFile(ctx context.Context, client *ssh.Client, remoteDir, localPath
 	}
 
 	filename := filepath.Base(localPath)
+	debugf("scp-upload: start path=%s size=%d remote=%s", localPath, stat.Size(), remoteDir)
 	if err := session.Start(fmt.Sprintf("scp -t %q", remoteDir)); err != nil {
+		debugf("scp-upload: Start err=%v", err)
 		return fmt.Errorf("start remote scp: %w", err)
 	}
 
@@ -881,34 +994,43 @@ func scpUploadFile(ctx context.Context, client *ssh.Client, remoteDir, localPath
 	}
 
 	if err := readResp(); err != nil {
+		debugf("scp-upload: initial ack err=%v", err)
 		return err
 	}
 
 	mode := fmt.Sprintf("0%o", stat.Mode().Perm())
 	header := fmt.Sprintf("C%s %d %s\n", mode, stat.Size(), filename)
 	if _, err := stdin.Write([]byte(header)); err != nil {
+		debugf("scp-upload: header write err=%v", err)
 		return fmt.Errorf("send scp header: %w", err)
 	}
 
 	if err := readResp(); err != nil {
+		debugf("scp-upload: header ack err=%v", err)
 		return err
 	}
+	debugf("scp-upload: header acked, sending data")
 
 	var writer io.Writer = stdin
 	if progress != nil {
 		writer = io.MultiWriter(stdin, progress)
 	}
 	if _, err := io.Copy(writer, f); err != nil {
+		debugf("scp-upload: data copy err=%v", err)
 		return fmt.Errorf("send file data: %w", err)
 	}
+	debugf("scp-upload: data sent, sending end marker")
 
 	if _, err := stdin.Write([]byte{0}); err != nil {
+		debugf("scp-upload: end marker err=%v", err)
 		return fmt.Errorf("send scp end marker: %w", err)
 	}
 
 	if err := readResp(); err != nil {
+		debugf("scp-upload: final ack err=%v", err)
 		return err
 	}
+	debugf("scp-upload: done")
 
 	_ = stdin.Close()
 	return session.Wait()
@@ -1025,7 +1147,7 @@ func sendDirRecursive(stdin io.Writer, readResp func() error, rootDir, localDir 
 			relPath, _ := filepath.Rel(rootDir, fullPath)
 			progress.update(relPath)
 		}
-		if err := sendFileEntry(stdin, fullPath, fi, nil); err != nil {
+		if err := sendFileEntry(stdin, fullPath, fi, nil, progress.addBytes); err != nil {
 			return err
 		}
 		if err := readResp(); err != nil {
@@ -1051,7 +1173,7 @@ func sendDirEnd(stdin io.Writer) error {
 }
 
 // sendFileEntry sends a complete SCP file entry (header + data + end marker).
-func sendFileEntry(stdin io.Writer, localPath string, info os.FileInfo, progress io.Writer) error {
+func sendFileEntry(stdin io.Writer, localPath string, info os.FileInfo, progress io.Writer, onBytes func(int)) error {
 	f, err := os.Open(localPath)
 	if err != nil {
 		return err
@@ -1069,6 +1191,9 @@ func sendFileEntry(stdin io.Writer, localPath string, info os.FileInfo, progress
 	var writer io.Writer = stdin
 	if progress != nil {
 		writer = io.MultiWriter(stdin, progress)
+	}
+	if onBytes != nil {
+		writer = &countingWriter{w: writer, onWrite: onBytes}
 	}
 	if _, err := io.Copy(writer, f); err != nil {
 		return err
@@ -1182,31 +1307,39 @@ func handleDownloadAction(tty io.Writer, stdinReader io.Reader, client *ssh.Clie
 }
 
 // remoteStat checks if a remote path is a file or directory.
+//
+// Uses test -d / test -f (POSIX, locale-independent) rather than parsing
+// `stat` text output: the previous implementation inspected `stat -c '%F %s'`
+// for the substring "directory", which broke when the remote locale rendered
+// the type differently (or stat emitted nothing), causing directories to be
+// misclassified as files and downloaded via `scp -f` (no -r) — failing with
+// "not a regular file". Runs under /bin/sh via remoteRunSh so the login shell
+// (fish / oh-my-zsh) is irrelevant.
 func remoteStat(client *ssh.Client, remotePath string) (isDir bool, size int64, err error) {
-	session, err := client.NewSession()
-	if err != nil {
-		return false, 0, err
-	}
-	defer session.Close()
-
-	var buf bytes.Buffer
-	session.Stdout = &buf
-	// Use ls -ld to get info about the path itself (not its contents).
-	if err := session.Run(fmt.Sprintf("stat -c '%%F %%s' %q 2>/dev/null || ls -ld %q 2>/dev/null", remotePath, remotePath)); err != nil {
-		return false, 0, err
-	}
-
-	out := strings.TrimSpace(buf.String())
-	if strings.Contains(out, "directory") || strings.Contains(out, "d") {
+	// Directory check. test -d exits 1 for non-directories — that is NOT an
+	// error, it just means "not a directory". Only hard errors (SSH timeout,
+	// connection drop) should abort.
+	out, _ := remoteRunSh(client, "test -d "+shQuote(remotePath)+" && echo yes", 5*time.Second)
+	debugf("remoteStat: test -d %q -> out=%q", remotePath, out)
+	if out == "yes" {
 		return true, 0, nil
 	}
 
-	// Try to extract size.
-	var s int64
-	if _, err := fmt.Sscanf(out, "%*s %d", &s); err == nil {
-		return false, s, nil
+	// Not a directory: confirm it is a regular file and read its size.
+	out, err = remoteRunSh(client, "test -f "+shQuote(remotePath)+" && stat -c %s "+shQuote(remotePath), 5*time.Second)
+	debugf("remoteStat: test -f+stat %q -> out=%q err=%v", remotePath, out, err)
+	if err != nil {
+		return false, 0, err
 	}
-	return false, 0, nil
+	if out == "" {
+		// Neither a directory nor a regular file (missing, socket, device,
+		// broken symlink, ...). Surface as an error so the caller reports
+		// "not found" instead of attempting a doomed scp.
+		return false, 0, fmt.Errorf("not a regular file or directory: %s", remotePath)
+	}
+	var s int64
+	fmt.Sscanf(out, "%d", &s)
+	return false, s, nil
 }
 
 // handleFileDownload downloads a single remote file to local Downloads dir.
@@ -1228,7 +1361,10 @@ func handleFileDownload(tty io.Writer, stdinReader io.Reader, client *ssh.Client
 		downLabel, filename, localDir, cancelHint)
 
 	progress := &ttyProgress{tty: tty, total: size, loc: loc}
+	stopTicker := progress.startLiveRenderer()
 	err := scpDownloadFile(ctx, client, remotePath, localPath, progress)
+	stopTicker()
+	progress.render()
 	fmt.Fprintf(tty, "\r\n")
 
 	if err != nil {
@@ -1258,9 +1394,10 @@ func handleDirDownload(tty io.Writer, stdinReader io.Reader, client *ssh.Client,
 	scanLabel := localeT(loc, "scanning remote directory...", "扫描远程目录...")
 	fmt.Fprintf(tty, "\x1b[36m⋯ %s\x1b[0m\r", scanLabel)
 
-	totalFiles, err := countRemoteFiles(client, remotePath)
+	totalFiles, totalSize, err := countRemoteFiles(client, remotePath)
 	if err != nil {
 		totalFiles = 0 // proceed without count
+		totalSize = 0
 	}
 
 	// Show confirmation.
@@ -1281,9 +1418,12 @@ func handleDirDownload(tty io.Writer, stdinReader io.Reader, client *ssh.Client,
 	fmt.Fprintf(tty, "\x1b[36m⋯ %s %s/ → %s/ — %s\x1b[0m\r\n",
 		downLabel, dirName, localDir, cancelHint)
 
-	progress := &dirProgress{tty: tty, total: totalFiles, loc: loc}
+	progress := &dirProgress{tty: tty, total: totalFiles, totalBytes: totalSize, loc: loc}
+	stopTicker := progress.startLiveRenderer()
 	// Pass localDir as parent — recvDirRecursive will create the top-level dir.
 	err = scpDownloadDir(ctx, client, remotePath, localDir, progress)
+	stopTicker()
+	progress.render()
 	fmt.Fprintf(tty, "\r\n")
 
 	if err != nil {
@@ -1303,23 +1443,22 @@ func handleDirDownload(tty io.Writer, stdinReader io.Reader, client *ssh.Client,
 		successLabel, dirName, progress.current, fileLabel, localDir)
 }
 
-// countRemoteFiles counts files in a remote directory.
-func countRemoteFiles(client *ssh.Client, remotePath string) (int, error) {
-	session, err := client.NewSession()
+// countRemoteFiles counts files in a remote directory and sums their sizes.
+// Returns (count, totalSize, error). Both are best-effort; on error callers
+// proceed with 0 (progress falls back to file-count-only rendering).
+func countRemoteFiles(client *ssh.Client, remotePath string) (int, int64, error) {
+	// stat -c %s prints each file size on its own line; awk sums sizes and
+	// counts lines. Output: "<count> <totalSize>". Falls back gracefully if
+	// stat fails on a file (skips it). Runs under /bin/sh via remoteRunSh.
+	script := "find " + shQuote(remotePath) + " -type f -exec stat -c %s {} + 2>/dev/null | awk '{s+=$1;c++} END{print c,s}'"
+	out, err := remoteRunSh(client, script, 5*time.Second)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	defer session.Close()
-
-	var buf bytes.Buffer
-	session.Stdout = &buf
-	if err := session.Run(fmt.Sprintf("find %q -type f 2>/dev/null | wc -l", remotePath)); err != nil {
-		return 0, err
-	}
-
 	var count int
-	fmt.Sscanf(strings.TrimSpace(buf.String()), "%d", &count)
-	return count, nil
+	var size int64
+	fmt.Sscanf(out, "%d %d", &count, &size)
+	return count, size, nil
 }
 
 // scpDownloadFile downloads a single file from remote using SCP protocol.
@@ -1450,6 +1589,37 @@ func scpDownloadDir(ctx context.Context, client *ssh.Client, remotePath, localDi
 	return recvDirRecursive(stdin, stdout, localDir, progress, ctx)
 }
 
+// countingReader wraps an io.Reader and reports each Read's byte count to a
+// callback. Used to feed byte-level progress during SCP downloads (io.CopyN
+// from the remote stdout).
+type countingReader struct {
+	r      io.Reader
+	onRead func(int)
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if n > 0 && c.onRead != nil {
+		c.onRead(n)
+	}
+	return n, err
+}
+
+// countingWriter wraps an io.Writer and reports each Write's byte count to a
+// callback. Used to feed byte-level progress during SCP uploads.
+type countingWriter struct {
+	w       io.Writer
+	onWrite func(int)
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	if n > 0 && c.onWrite != nil {
+		c.onWrite(n)
+	}
+	return n, err
+}
+
 // readSCPLine reads a newline-terminated line from the SCP protocol.
 func readSCPLine(r io.Reader) (string, error) {
 	var buf []byte
@@ -1505,6 +1675,12 @@ func recvDirRecursive(stdin io.Writer, stdout io.Reader, localDir string, progre
 		case 'E': // End of directory — return, parent will ack.
 			return nil
 
+		case '\x01': // SCP error (e.g. socket, device — not transferable).
+			// Skip: the remote scp sends this for files it can't read
+			// (sockets, pipes, etc.). Log and continue to the next entry.
+			debugf("scp-dir: skipped error: %s", line[1:])
+			continue
+
 		case 'C': // File
 			var mode string
 			var size int64
@@ -1525,8 +1701,14 @@ func recvDirRecursive(stdin io.Writer, stdout io.Reader, localDir string, progre
 				return err
 			}
 
-			// Read file data.
-			if _, err := io.CopyN(f, stdout, size); err != nil {
+			// Read file data. Wrap stdout in a counting writer so the byte-level
+			// progress advances during large-file transfers (not just when a
+			// file finishes), keeping the live ticker meaningful.
+			var src io.Reader = stdout
+			if progress != nil {
+				src = &countingReader{r: stdout, onRead: progress.addBytes}
+			}
+			if _, err := io.CopyN(f, src, size); err != nil {
 				f.Close()
 				return err
 			}

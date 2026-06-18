@@ -298,17 +298,45 @@ func (c *defaultClient) Login() error {
 	currentLocale := AM.locale
 
 	handleUploadTrigger := func(reader io.Reader) {
+		debugf("trigger: double-tap detected")
 		if !shouldTriggerUploadHint() {
+			debugf("trigger: suppressed by debounce")
 			return
 		}
-		// Don't trigger if a fullscreen program (vim, less, etc.) is running.
-		if !isRemoteIdle(client) {
+
+		// Open the dialog TTY up front (with a stdout fallback) and show
+		// instant feedback, so the user sees the double-tap registered even
+		// while remote probes — which can be slow on fish / oh-my-zsh — run.
+		tty, closeTTY := openDialogTTY()
+		defer closeTTY()
+		debugf("trigger: tty opened")
+
+		// Disable kitty keyboard mode locally for the whole dialog+upload so
+		// Esc/Ctrl+C arrive as legacy 0x1b/0x03 (cancel works) instead of
+		// kitty CSI-u sequences. Restored on exit — preserves the remote's
+		// flag state via the push/pop stack.
+		kittyPushOff(tty)
+		defer kittyPop(tty)
+		debugf("trigger: kitty keyboard disabled for dialog")
+
+		probingMsg := localeT(currentLocale, "probing remote...", "探测远程...")
+		fmt.Fprintf(tty, "\r\n\x1b[2m⋯ TTM: %s\x1b[0m\r\n", probingMsg)
+
+		// Best-effort idle check. Bounded; on any failure/timeout we assume
+		// idle and proceed, so a slow/hung remote shell can't block the dialog.
+		idle := isRemoteIdle(client)
+		debugf("trigger: isRemoteIdle=%v", idle)
+		if !idle {
+			busyMsg := localeT(currentLocale, "remote busy (fullscreen program detected), aborted", "远程忙碌（检测到全屏程序），已中止")
+			fmt.Fprintf(tty, "\x1b[33m%s\x1b[0m\r\n", busyMsg)
+			printEndBanner(tty, currentLocale)
 			return
 		}
-		uploadWithDialog(reader, stdinPipe, client, connInfo, currentLocale)
+
+		uploadWithDialog(reader, stdinPipe, client, connInfo, currentLocale, tty)
 	}
 
-	stdinCopyDone, cancelStdinCopy, err := startStdinCopyWithIntercept(stdinPipe, handleUploadTrigger)
+	stdinCopyDone, cancelStdinCopy, err := startStdinCopyWithIntercept(stdinPipe, client, handleUploadTrigger)
 	if err != nil {
 		return fmt.Errorf("open local stdin reader: %w", err)
 	}
