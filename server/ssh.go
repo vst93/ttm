@@ -273,8 +273,10 @@ func (c *defaultClient) Login() error {
 		return fmt.Errorf("request remote PTY: %w", err)
 	}
 
-	session.Stdout = os.Stdout
-	session.Stderr = os.Stderr
+	cwdCache := newRemoteCwdCache()
+	stdoutWriter := newRemoteOutputCwdWriter(os.Stdout, cwdCache)
+	session.Stdout = stdoutWriter
+	session.Stderr = stdoutWriter
 	stdinPipe, err := session.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("open remote stdin pipe: %w", err)
@@ -297,18 +299,49 @@ func (c *defaultClient) Login() error {
 	connInfo := buildSSHConnInfo(client, c.node)
 	currentLocale := AM.locale
 
-	handleUploadTrigger := func(reader io.Reader) {
+	handleUploadTrigger := func(reader io.Reader, idleChecked bool) {
+		debugf("trigger: double-tap detected")
 		if !shouldTriggerUploadHint() {
+			debugf("trigger: suppressed by debounce")
 			return
 		}
-		// Don't trigger if a fullscreen program (vim, less, etc.) is running.
-		if !isRemoteIdle(client) {
-			return
+
+		// Open the dialog TTY up front (with a stdout fallback) and show
+		// instant feedback, so the user sees the double-tap registered even
+		// while remote probes — which can be slow on fish / oh-my-zsh — run.
+		tty, closeTTY := openDialogTTY()
+		defer closeTTY()
+		debugf("trigger: tty opened")
+
+		// Disable kitty keyboard mode locally for the whole dialog+upload so
+		// Esc/Ctrl+C arrive as legacy 0x1b/0x03 (cancel works) instead of
+		// kitty CSI-u sequences. Restored on exit — preserves the remote's
+		// flag state via the push/pop stack.
+		kittyPushOff(tty)
+		defer kittyPop(tty)
+		debugf("trigger: kitty keyboard disabled for dialog")
+
+		openingMsg := localeT(currentLocale, "opening transfer...", "打开传输菜单...")
+		fmt.Fprintf(tty, "\r\n\x1b[2m⋯ TTM: %s\x1b[0m\r\n", openingMsg)
+
+		// Best-effort idle check. In the normal double-press flow this was
+		// already done by the interceptor; avoid probing twice because some
+		// fish / oh-my-zsh setups make each exec-session probe noticeably slow.
+		if !idleChecked {
+			idle := isRemoteIdle(client)
+			debugf("trigger: isRemoteIdle=%v", idle)
+			if !idle {
+				busyMsg := localeT(currentLocale, "remote busy (fullscreen program detected), aborted", "远程忙碌（检测到全屏程序），已中止")
+				fmt.Fprintf(tty, "\x1b[33m%s\x1b[0m\r\n", busyMsg)
+				printEndBanner(tty, currentLocale)
+				return
+			}
 		}
-		uploadWithDialog(reader, stdinPipe, client, connInfo, currentLocale)
+
+		uploadWithDialog(reader, cwdCache, client, connInfo, currentLocale, tty)
 	}
 
-	stdinCopyDone, cancelStdinCopy, err := startStdinCopyWithIntercept(stdinPipe, handleUploadTrigger)
+	stdinCopyDone, cancelStdinCopy, err := startStdinCopyWithIntercept(stdinPipe, client, cwdCache, handleUploadTrigger)
 	if err != nil {
 		return fmt.Errorf("open local stdin reader: %w", err)
 	}
