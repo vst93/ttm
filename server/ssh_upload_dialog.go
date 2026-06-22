@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -285,6 +286,53 @@ func clearInputLine(tty io.Writer, input []rune) {
 	}
 }
 
+func normalizeRemotePathInput(s string) string {
+	s = strings.TrimSpace(s)
+	s = trimMatchingQuotes(s)
+	s = strings.ReplaceAll(s, `\ `, " ")
+	s = strings.ReplaceAll(s, `\\`, `\`)
+	return strings.TrimRight(s, "/")
+}
+
+func normalizeLocalPathInput(s string) string {
+	s = strings.TrimSpace(s)
+	s = trimMatchingQuotes(s)
+	s = strings.ReplaceAll(s, `\ `, " ")
+	if runtime.GOOS != "windows" {
+		s = strings.ReplaceAll(s, `\\`, `\`)
+	}
+	if strings.HasPrefix(s, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			s = filepath.Join(home, s[2:])
+		}
+	}
+	if runtime.GOOS == "windows" {
+		if strings.HasPrefix(s, `~\`) {
+			if home, err := os.UserHomeDir(); err == nil {
+				s = filepath.Join(home, s[2:])
+			}
+		}
+		return strings.TrimRight(s, `\/`)
+	}
+	return strings.TrimRight(s, "/")
+}
+
+func trimMatchingQuotes(s string) string {
+	if len(s) < 2 {
+		return s
+	}
+	if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
+		return s[1 : len(s)-1]
+	}
+	return s
+}
+
+// remoteEntry is one path-completion candidate from the remote filesystem.
+type remoteEntry struct {
+	name  string
+	isDir bool
+}
+
 // remoteTabComplete performs Tab completion for remote paths via SSH.
 // Returns the completed path and a list of suggestions.
 func remoteTabComplete(client *ssh.Client, input string) (string, []string) {
@@ -303,59 +351,79 @@ func remoteTabComplete(client *ssh.Client, input string) (string, []string) {
 		prefix = ""
 	}
 
-	// Query remote server for all entries, then filter by prefix in Go.
-	// Fetching the full listing (instead of `ls | grep` remotely) keeps the
-	// command shell-agnostic (runs under /bin/sh via remoteRunSh) and avoids
-	// regex/quoting pitfalls when the prefix contains special characters.
-	out, err := remoteRunSh(client, "ls -1a "+shQuote(dir)+" 2>/dev/null", 5*time.Second)
+	entries, err := listRemoteEntries(client, dir)
 	if err != nil {
 		return input, nil
 	}
 
-	lines := strings.Split(out, "\n")
 	var matches []string
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || line == "." || line == ".." {
+	var firstMatch remoteEntry
+	foundFirst := false
+	for _, entry := range entries {
+		if entry.name == "" || entry.name == "." || entry.name == ".." {
 			continue
 		}
-		if prefix != "" && !strings.HasPrefix(line, prefix) {
+		if prefix != "" && !strings.HasPrefix(entry.name, prefix) {
 			continue
 		}
-		matches = append(matches, line)
+		matches = append(matches, entry.name)
+		if !foundFirst {
+			firstMatch = entry
+			foundFirst = true
+		}
 	}
 
-	if len(matches) == 0 {
+	if !foundFirst {
 		return input, nil
 	}
 
-	// Use the first match.
-	first := matches[0]
-
-	// Build completed path.
 	var completed string
 	if dir == "." {
-		completed = first
+		completed = firstMatch.name
 	} else {
-		completed = filepath.Join(dir, first)
+		completed = filepath.Join(dir, firstMatch.name)
 	}
-
-	// Check if it's a directory (add trailing /).
-	isDir := isRemoteDir(client, completed)
-	if isDir {
+	if firstMatch.isDir {
 		completed += "/"
 	}
 
 	return completed, matches
 }
 
-// isRemoteDir checks if a remote path is a directory.
-func isRemoteDir(client *ssh.Client, path string) bool {
-	out, err := remoteRunSh(client, "test -d "+shQuote(path)+" && echo yes", 5*time.Second)
-	if err != nil {
-		return false
+// listRemoteEntries lists direct children of dir and marks which ones are directories.
+func listRemoteEntries(client *ssh.Client, dir string) ([]remoteEntry, error) {
+	if client == nil {
+		return nil, nil
 	}
-	return out == "yes"
+	// Print one entry per line as: <name><TAB><type>, where type is d or f.
+	// Using a single find avoids a second round-trip just to test the first match.
+	script := "find " + shQuote(dir) + " -mindepth 1 -maxdepth 1 \\( -type d -printf '%f\\td\\n' -o -printf '%f\\tf\\n' \\) 2>/dev/null"
+	out, err := remoteRunSh(client, script, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	return parseRemoteEntries(out), nil
+}
+
+func parseRemoteEntries(out string) []remoteEntry {
+	if strings.TrimSpace(out) == "" {
+		return nil
+	}
+	lines := strings.Split(out, "\n")
+	entries := make([]remoteEntry, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		entry := remoteEntry{name: parts[0]}
+		if len(parts) == 2 && parts[1] == "d" {
+			entry.isDir = true
+		}
+		entries = append(entries, entry)
+	}
+	return entries
 }
 
 // uniqueLocalPath returns a path that doesn't exist yet by appending a number.
@@ -392,7 +460,7 @@ func showUploadInputs(tty io.Writer, stdinReader io.Reader, defaultRemoteDir str
 		fmt.Fprintf(tty, "  %s: \x1b[33m%s\x1b[0m ", remoteLabel, fallbackTag)
 	}
 
-	remoteDir := readInputLine(tty, stdinReader, defaultRemoteDir)
+	remoteDir := normalizeRemotePathInput(readInputLine(tty, stdinReader, defaultRemoteDir))
 	if remoteDir == "" {
 		cancelMsg := localeT(loc, "cancelled", "已取消")
 		fmt.Fprintf(tty, "\x1b[2m%s\x1b[0m\r\n", cancelMsg)
@@ -400,7 +468,7 @@ func showUploadInputs(tty io.Writer, stdinReader io.Reader, defaultRemoteDir str
 	}
 
 	fmt.Fprintf(tty, "  %s: ", localLabel)
-	localPath := readInputLine(tty, stdinReader, "")
+	localPath := normalizeLocalPathInput(readInputLine(tty, stdinReader, ""))
 	if localPath == "" {
 		cancelMsg := localeT(loc, "cancelled (empty path)", "已取消（路径为空）")
 		fmt.Fprintf(tty, "\x1b[2m%s\x1b[0m\r\n", cancelMsg)
@@ -424,14 +492,19 @@ func openDialogTTY() (io.Writer, func()) {
 // uploadWithDialog runs the full interactive flow: menu → action.
 // The tty writer is provided by the caller (opened up front for instant
 // feedback) so the dialog does not depend on a second openLocalTTY call.
-func uploadWithDialog(stdinReader io.Reader, stdinPipe io.WriteCloser, client *ssh.Client, info sshConnInfo, loc locale, tty io.Writer) {
-	remoteDir, dirDetected := queryRemotePwd(stdinPipe, client)
-	debugf("dialog: cwd=%q detected=%v", remoteDir, dirDetected)
-
+func uploadWithDialog(stdinReader io.Reader, cwdCache *remoteCwdCache, client *ssh.Client, info sshConnInfo, loc locale, tty io.Writer) {
 	action, ok := showActionMenu(tty, stdinReader, loc)
 	debugf("dialog: menu action=%v ok=%v", action, ok)
 	if !ok {
 		return
+	}
+
+	remoteDir := "~"
+	dirDetected := false
+	needRemoteDir := action == uploadActionCopy || action == uploadActionUpload || action == uploadActionDownload
+	if needRemoteDir {
+		remoteDir, dirDetected = queryRemotePwd(cwdCache, client)
+		debugf("dialog: cwd=%q detected=%v", remoteDir, dirDetected)
 	}
 
 	switch action {
@@ -474,16 +547,8 @@ func handleUploadAction(tty io.Writer, stdinReader io.Reader, client *ssh.Client
 		return
 	}
 
-	// Strip trailing slashes.
-	remoteDir = strings.TrimRight(remoteDir, "/")
-	localPath = strings.TrimRight(localPath, "/")
-
-	// Expand ~ to home directory.
-	if strings.HasPrefix(localPath, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			localPath = filepath.Join(home, localPath[2:])
-		}
-	}
+	remoteDir = normalizeRemotePathInput(remoteDir)
+	localPath = normalizeLocalPathInput(localPath)
 
 	// Check local path exists.
 	fi, err := os.Stat(localPath)
@@ -557,6 +622,9 @@ func handleFileUpload(tty io.Writer, stdinReader io.Reader, client *ssh.Client, 
 	stopTicker := progress.startLiveRenderer()
 	uploadErr := scpUploadFile(ctx, client, remoteDir, localPath, progress)
 	stopTicker()
+	if uploadErr == nil {
+		progress.finish()
+	}
 	progress.render()
 	fmt.Fprintf(tty, "\r\n")
 
@@ -618,10 +686,13 @@ func handleDirUpload(tty io.Writer, stdinReader io.Reader, client *ssh.Client, i
 		upLabel, dirName, totalFiles, fileLabel, formatFileSize(totalSize), cancelHint)
 
 	// Start recursive upload.
-	progress := &dirProgress{tty: tty, total: totalFiles, totalBytes: totalSize, loc: loc}
+	progress := &dirProgress{tty: tty, total: totalFiles, totalBytes: totalSize, countKnown: true, loc: loc}
 	stopTicker := progress.startLiveRenderer()
 	uploadErr := scpUploadDir(ctx, client, remoteDir, localDir, progress)
 	stopTicker()
+	if uploadErr == nil {
+		progress.finish()
+	}
 	progress.render()
 	fmt.Fprintf(tty, "\r\n")
 
@@ -720,6 +791,7 @@ type ttyProgress struct {
 	lastWritten int64   // bytes at last render, for speed calculation
 	speed       float64 // smoothed speed (bytes/sec)
 	startTime   time.Time
+	done        bool
 	loc         locale
 	mu          sync.Mutex // guards written/render state (Write vs live ticker)
 }
@@ -767,9 +839,16 @@ func (p *ttyProgress) render() {
 }
 
 func (p *ttyProgress) renderLocked() {
+	shownWritten := p.written
 	pct := 0
 	if p.total > 0 {
-		pct = int(p.written * 100 / p.total)
+		pct = int(shownWritten * 100 / p.total)
+	} else if p.done {
+		pct = 100
+	}
+	if p.done && p.total > 0 && shownWritten < p.total {
+		shownWritten = p.total
+		pct = 100
 	}
 	if pct > 100 {
 		pct = 100
@@ -783,9 +862,9 @@ func (p *ttyProgress) renderLocked() {
 	etaLabel := localeT(p.loc, "eta", "剩余")
 
 	fmt.Fprintf(p.tty, "\r\x1b[K  %s %3d%%  %s/%s",
-		bar, pct, formatFileSize(p.written), formatFileSize(p.total))
+		bar, pct, formatFileSize(shownWritten), formatFileSize(p.total))
 
-	if p.speed > 0 {
+	if !p.done && p.total > 0 && p.speed > 0 && p.written < p.total {
 		remaining := float64(p.total-p.written) / p.speed
 		fmt.Fprintf(p.tty, "  %s: %s/s  %s: %s",
 			speedLabel, formatFileSize(int64(p.speed)),
@@ -797,6 +876,15 @@ func (p *ttyProgress) renderLocked() {
 // progress stays live even when Write is throttled or blocked on SSH flow
 // control (previously the bar could freeze at 0% when stdin.Write stalled).
 // Returns a stop func that MUST be called when the transfer ends.
+func (p *ttyProgress) finish() {
+	p.mu.Lock()
+	p.done = true
+	if p.total > 0 && p.written < p.total {
+		p.written = p.total
+	}
+	p.mu.Unlock()
+}
+
 func (p *ttyProgress) startLiveRenderer() (stop func()) {
 	done := make(chan struct{})
 	go func() {
@@ -827,6 +915,8 @@ type dirProgress struct {
 	current    int   // files completed
 	written    int64 // bytes received so far (across all files)
 	lastFile   string
+	countKnown bool
+	done       bool
 	loc        locale
 	mu         sync.Mutex
 }
@@ -857,11 +947,14 @@ func (p *dirProgress) renderLocked() {
 	barWidth := 20
 	var filled int
 	// Prefer byte-based fill when a total size is known (smooth during large
-	// files); fall back to file-count fill; else empty bar.
+	// files); fall back to file-count fill; else empty bar until completion.
 	if p.totalBytes > 0 {
 		filled = int(p.written * int64(barWidth) / p.totalBytes)
 	} else if p.total > 0 {
 		filled = p.current * barWidth / p.total
+	}
+	if p.done && filled == 0 {
+		filled = barWidth
 	}
 	if filled > barWidth {
 		filled = barWidth
@@ -875,18 +968,39 @@ func (p *dirProgress) renderLocked() {
 		filename = "..." + string(runes[len(runes)-27:])
 	}
 
-	// Show byte progress when known, plus file count; otherwise just count.
+	fileCountLabel := localeT(p.loc, "files", "个文件")
+
+	// Show byte progress when known, plus file count; otherwise show either a
+	// known file count or only the completed count when the total is unknown.
 	if p.totalBytes > 0 {
 		fmt.Fprintf(p.tty, "\r\x1b[K  %s %s/%s  %d/%d  %s",
 			bar, formatFileSize(p.written), formatFileSize(p.totalBytes), p.current, p.total, filename)
-	} else {
+	} else if p.total > 0 {
 		fmt.Fprintf(p.tty, "\r\x1b[K  %s %d/%d  %s",
 			bar, p.current, p.total, filename)
+	} else if p.countKnown || p.current > 0 {
+		fmt.Fprintf(p.tty, "\r\x1b[K  %s %d %s  %s",
+			bar, p.current, fileCountLabel, filename)
+	} else {
+		fmt.Fprintf(p.tty, "\r\x1b[K  %s %s",
+			bar, filename)
 	}
 }
 
 // startLiveRenderer spawns a goroutine that redraws every 150ms so directory
 // progress stays live between file completions. Returns a stop func.
+func (p *dirProgress) finish() {
+	p.mu.Lock()
+	p.done = true
+	if p.totalBytes > 0 && p.written < p.totalBytes {
+		p.written = p.totalBytes
+	}
+	if p.total > 0 && p.current < p.total {
+		p.current = p.total
+	}
+	p.mu.Unlock()
+}
+
 func (p *dirProgress) startLiveRenderer() (stop func()) {
 	done := make(chan struct{})
 	go func() {
@@ -1263,7 +1377,7 @@ func handleDownloadAction(tty io.Writer, stdinReader io.Reader, client *ssh.Clie
 	remoteLabel := localeT(loc, "Remote path (Tab to complete)", "远程路径 (Tab 补全)")
 	fmt.Fprintf(tty, "\r\n  %s: ", remoteLabel)
 
-	remotePath := readRemotePath(tty, stdinReader, client, remoteDir+"/")
+	remotePath := normalizeRemotePathInput(readRemotePath(tty, stdinReader, client, remoteDir+"/"))
 	if remotePath == "" {
 		cancelMsg := localeT(loc, "cancelled", "已取消")
 		fmt.Fprintf(tty, "\x1b[2m%s\x1b[0m\r\n", cancelMsg)
@@ -1275,7 +1389,7 @@ func handleDownloadAction(tty io.Writer, stdinReader io.Reader, client *ssh.Clie
 	defaultLocal := getDownloadsDir()
 	localLabel := localeT(loc, "Local save dir", "本地保存目录")
 	fmt.Fprintf(tty, "  %s: ", localLabel)
-	localDir := readInputLine(tty, stdinReader, defaultLocal)
+	localDir := normalizeLocalPathInput(readInputLine(tty, stdinReader, defaultLocal))
 	if localDir == "" {
 		localDir = defaultLocal
 	}
@@ -1308,38 +1422,33 @@ func handleDownloadAction(tty io.Writer, stdinReader io.Reader, client *ssh.Clie
 
 // remoteStat checks if a remote path is a file or directory.
 //
-// Uses test -d / test -f (POSIX, locale-independent) rather than parsing
-// `stat` text output: the previous implementation inspected `stat -c '%F %s'`
-// for the substring "directory", which broke when the remote locale rendered
-// the type differently (or stat emitted nothing), causing directories to be
-// misclassified as files and downloaded via `scp -f` (no -r) — failing with
-// "not a regular file". Runs under /bin/sh via remoteRunSh so the login shell
-// (fish / oh-my-zsh) is irrelevant.
+// Runs as a single remote probe to avoid the previous two-round-trip flow
+// (`test -d`, then `test -f + stat`), which was noticeable on higher-latency
+// SSH links and startup-heavy shells.
 func remoteStat(client *ssh.Client, remotePath string) (isDir bool, size int64, err error) {
-	// Directory check. test -d exits 1 for non-directories — that is NOT an
-	// error, it just means "not a directory". Only hard errors (SSH timeout,
-	// connection drop) should abort.
-	out, _ := remoteRunSh(client, "test -d "+shQuote(remotePath)+" && echo yes", 5*time.Second)
-	debugf("remoteStat: test -d %q -> out=%q", remotePath, out)
-	if out == "yes" {
-		return true, 0, nil
-	}
-
-	// Not a directory: confirm it is a regular file and read its size.
-	out, err = remoteRunSh(client, "test -f "+shQuote(remotePath)+" && stat -c %s "+shQuote(remotePath), 5*time.Second)
-	debugf("remoteStat: test -f+stat %q -> out=%q err=%v", remotePath, out, err)
+	script := "if test -d " + shQuote(remotePath) + "; then echo d; " +
+		"elif test -f " + shQuote(remotePath) + "; then printf 'f '; stat -c %s " + shQuote(remotePath) + "; " +
+		"fi"
+	out, err := remoteRunSh(client, script, 5*time.Second)
+	debugf("remoteStat: path=%q -> out=%q err=%v", remotePath, out, err)
 	if err != nil {
 		return false, 0, err
 	}
-	if out == "" {
-		// Neither a directory nor a regular file (missing, socket, device,
-		// broken symlink, ...). Surface as an error so the caller reports
-		// "not found" instead of attempting a doomed scp.
-		return false, 0, fmt.Errorf("not a regular file or directory: %s", remotePath)
+	return parseRemoteStatOutput(out, remotePath)
+}
+
+func parseRemoteStatOutput(out, remotePath string) (isDir bool, size int64, err error) {
+	if out == "d" {
+		return true, 0, nil
 	}
-	var s int64
-	fmt.Sscanf(out, "%d", &s)
-	return false, s, nil
+	if strings.HasPrefix(out, "f ") {
+		var s int64
+		if _, scanErr := fmt.Sscanf(strings.TrimPrefix(out, "f "), "%d", &s); scanErr != nil {
+			return false, 0, fmt.Errorf("parse remote file size: %w", scanErr)
+		}
+		return false, s, nil
+	}
+	return false, 0, fmt.Errorf("not a regular file or directory: %s", remotePath)
 }
 
 // handleFileDownload downloads a single remote file to local Downloads dir.
@@ -1364,6 +1473,9 @@ func handleFileDownload(tty io.Writer, stdinReader io.Reader, client *ssh.Client
 	stopTicker := progress.startLiveRenderer()
 	err := scpDownloadFile(ctx, client, remotePath, localPath, progress)
 	stopTicker()
+	if err == nil {
+		progress.finish()
+	}
 	progress.render()
 	fmt.Fprintf(tty, "\r\n")
 
@@ -1404,7 +1516,7 @@ func handleDirDownload(tty io.Writer, stdinReader io.Reader, client *ssh.Client,
 	fileLabel := localeT(loc, "files", "个文件")
 	downloadLabel := localeT(loc, "Download directory", "下载目录")
 	countStr := ""
-	if totalFiles > 0 {
+	if err == nil {
 		countStr = fmt.Sprintf(" (%d %s)", totalFiles, fileLabel)
 	}
 	summary := fmt.Sprintf("\r\n  %s: %s/%s → %s/\r\n",
@@ -1418,11 +1530,14 @@ func handleDirDownload(tty io.Writer, stdinReader io.Reader, client *ssh.Client,
 	fmt.Fprintf(tty, "\x1b[36m⋯ %s %s/ → %s/ — %s\x1b[0m\r\n",
 		downLabel, dirName, localDir, cancelHint)
 
-	progress := &dirProgress{tty: tty, total: totalFiles, totalBytes: totalSize, loc: loc}
+	progress := &dirProgress{tty: tty, total: totalFiles, totalBytes: totalSize, countKnown: err == nil, loc: loc}
 	stopTicker := progress.startLiveRenderer()
 	// Pass localDir as parent — recvDirRecursive will create the top-level dir.
 	err = scpDownloadDir(ctx, client, remotePath, localDir, progress)
 	stopTicker()
+	if err == nil {
+		progress.finish()
+	}
 	progress.render()
 	fmt.Fprintf(tty, "\r\n")
 

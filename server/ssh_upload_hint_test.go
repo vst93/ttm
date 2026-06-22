@@ -200,3 +200,35 @@ func TestTtyProgressThrottling(t *testing.T) {
 		t.Error("expected second write to be throttled")
 	}
 }
+
+func TestParseRemoteStatOutput(t *testing.T) {
+	cases := []struct {
+		name    string
+		out     string
+		isDir   bool
+		size    int64
+		wantErr bool
+	}{
+		{name: "dir", out: "d", isDir: true},
+		{name: "file", out: "f 123", size: 123},
+		{name: "missing", out: "", wantErr: true},
+		{name: "bad-size", out: "f nope", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isDir, size, err := parseRemoteStatOutput(tc.out, "/tmp/x")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q", tc.out)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if isDir != tc.isDir || size != tc.size {
+				t.Fatalf("got (%v,%d), want (%v,%d)", isDir, size, tc.isDir, tc.size)
+			}
+		})
+	}
+}

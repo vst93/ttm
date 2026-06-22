@@ -64,53 +64,20 @@ func isRemoteIdle(client *ssh.Client) bool {
 //
 // Tradeoff: the user will briefly see a `pwd > /tmp/.ttm_cwd` command on their
 // terminal. This is the most reliable way to get the actual cwd.
-func queryRemotePwd(stdinPipe io.WriteCloser, client *ssh.Client) (string, bool) {
-	if dir := probeShellCwdViaStdin(stdinPipe, client); dir != "" {
+func queryRemotePwd(cache *remoteCwdCache, client *ssh.Client) (string, bool) {
+	if dir, ok := cache.Get(); ok {
 		return dir, true
 	}
 
-	// Fallback: new session pwd (returns home directory).
+	// Fallback: a new exec session starts in the login shell's default cwd,
+	// which is typically $HOME. Cache it as the session home so later local
+	// `cd` tracking can resolve relative paths without probing interactively.
 	out, err := remoteRunSh(client, "pwd", 5*time.Second)
 	if err != nil || out == "" {
 		return "~", false
 	}
+	cache.SetHome(out)
 	return out, false
-}
-
-// probeShellCwdViaStdin injects `pwd` into the interactive shell's stdin,
-// captures the output via a temp file, and reads it back through the
-// shell-agnostic middleware.
-//
-// The injected `pwd > /tmp/...` is portable across bash/zsh/fish (all support
-// `>` redirection and the pwd builtin). The readback runs under /bin/sh via
-// remoteRunSh so it never depends on the login shell's syntax.
-//
-// Note: uses /tmp which assumes a Unix-like remote server. Will silently fail
-// on remote Windows servers (falls back to home directory detection).
-func probeShellCwdViaStdin(stdinPipe io.WriteCloser, client *ssh.Client) string {
-	tmpFile := fmt.Sprintf("/tmp/.ttm_cwd_%d_%d", os.Getpid(), time.Now().UnixNano()%100000)
-
-	// Inject command into the interactive shell.
-	// The shell will execute it and write cwd to the temp file.
-	injectCmd := fmt.Sprintf("pwd > %s\n", tmpFile)
-	if _, err := stdinPipe.Write([]byte(injectCmd)); err != nil {
-		return ""
-	}
-
-	// Wait for the shell to execute the command.
-	time.Sleep(800 * time.Millisecond)
-
-	// Read the temp file via the middleware, then clean up.
-	script := "cat " + shQuote(tmpFile) + " 2>/dev/null; rm -f " + shQuote(tmpFile)
-	out, err := remoteRunSh(client, script, 5*time.Second)
-	if err != nil {
-		return ""
-	}
-
-	if out == "" || out == "/" {
-		return ""
-	}
-	return out
 }
 
 // buildUploadCmd generates an scp command string with a placeholder for the
@@ -286,7 +253,7 @@ func scanCtrlGEvents(data []byte) []ctrlGEvent {
 // The handleTrigger callback receives the stdinReader so it can read user
 // input directly (e.g. for a dialog). It is called synchronously, blocking
 // stdin forwarding while the handler is active.
-func startStdinCopyWithIntercept(stdinPipe io.WriteCloser, client *ssh.Client, handleTrigger func(io.Reader)) (<-chan error, func(), error) {
+func startStdinCopyWithIntercept(stdinPipe io.WriteCloser, client *ssh.Client, cwdCache *remoteCwdCache, handleTrigger func(io.Reader, bool)) (<-chan error, func(), error) {
 	stdinReader, err := newStdinReader()
 	if err != nil {
 		return nil, nil, err
@@ -310,11 +277,13 @@ func startStdinCopyWithIntercept(stdinPipe io.WriteCloser, client *ssh.Client, h
 
 		buf := make([]byte, readBufSize)
 		var lastCtrlGTime time.Time // time of last Ctrl+G that was forwarded
+		inputTracker := newRemoteShellInputTracker(cwdCache)
 
 		forward := func(data []byte) error {
 			if len(data) == 0 {
 				return nil
 			}
+			inputTracker.Observe(data)
 			_, err := stdinPipe.Write(data)
 			return err
 		}
@@ -323,7 +292,7 @@ func startStdinCopyWithIntercept(stdinPipe io.WriteCloser, client *ssh.Client, h
 		// event e, then invokes the handler. The event bytes (raw 0x07 or the
 		// kitty sequence) are deliberately not forwarded so the remote shell
 		// does not see a second Ctrl+G.
-		triggerEvent := func(data []byte, e ctrlGEvent) error {
+		triggerEvent := func(data []byte, e ctrlGEvent, idleChecked bool) error {
 			if err := forward(data[:e.start]); err != nil {
 				return err
 			}
@@ -333,7 +302,7 @@ func startStdinCopyWithIntercept(stdinPipe io.WriteCloser, client *ssh.Client, h
 				}
 			}
 			if handleTrigger != nil {
-				handleTrigger(stdinReader)
+				handleTrigger(stdinReader, idleChecked)
 			}
 			return nil
 		}
@@ -382,7 +351,7 @@ func startStdinCopyWithIntercept(stdinPipe io.WriteCloser, client *ssh.Client, h
 					// Ctrl+G without waiting for a second press.
 					if triggerMode() == "single" {
 						debugf("ctrl+g: single-mode -> trigger")
-						if err := triggerEvent(data, e); err != nil {
+						if err := triggerEvent(data, e, false); err != nil {
 							done <- err
 							_ = stdinPipe.Close()
 							return
@@ -417,7 +386,7 @@ func startStdinCopyWithIntercept(stdinPipe io.WriteCloser, client *ssh.Client, h
 							break
 						}
 						debugf("ctrl+g: double-press (%v) -> trigger", now.Sub(lastCtrlGTime))
-						if err := triggerEvent(data, e); err != nil {
+						if err := triggerEvent(data, e, true); err != nil {
 							done <- err
 							_ = stdinPipe.Close()
 							return

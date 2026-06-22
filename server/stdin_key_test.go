@@ -299,3 +299,48 @@ func TestDirProgressByteLevelBar(t *testing.T) {
 		t.Errorf("expected 10 filled bars (50%%), got %d in %q", filled, out)
 	}
 }
+
+func TestTTYProgressZeroByteFinish(t *testing.T) {
+	var buf bytes.Buffer
+	p := &ttyProgress{tty: &buf, total: 0, loc: localeEN}
+	p.finish()
+	p.render()
+	out := buf.String()
+	if !strings.Contains(out, "100%") {
+		t.Fatalf("expected 100%% for zero-byte completion, got %q", out)
+	}
+	if filled := strings.Count(out, "█"); filled != 20 {
+		t.Fatalf("expected full bar for zero-byte completion, got %d in %q", filled, out)
+	}
+	if !strings.Contains(out, "0 B/0 B") {
+		t.Fatalf("expected 0 B/0 B output, got %q", out)
+	}
+}
+
+func TestDirProgressFinishWithUnknownCount(t *testing.T) {
+	var buf bytes.Buffer
+	p := &dirProgress{tty: &buf, total: 0, totalBytes: 0, countKnown: false, loc: localeEN}
+	p.finish()
+	p.render()
+	out := buf.String()
+	if strings.Contains(out, "0/0") {
+		t.Fatalf("did not expect 0/0 output, got %q", out)
+	}
+	if filled := strings.Count(out, "█"); filled != 20 {
+		t.Fatalf("expected full bar for finished unknown-count dir, got %d in %q", filled, out)
+	}
+}
+
+func TestDirProgressFinishEmptyDir(t *testing.T) {
+	var buf bytes.Buffer
+	p := &dirProgress{tty: &buf, total: 0, totalBytes: 0, countKnown: true, loc: localeEN}
+	p.finish()
+	p.render()
+	out := buf.String()
+	if !strings.Contains(out, "0 files") {
+		t.Fatalf("expected empty-dir summary, got %q", out)
+	}
+	if filled := strings.Count(out, "█"); filled != 20 {
+		t.Fatalf("expected full bar for empty dir, got %d in %q", filled, out)
+	}
+}
