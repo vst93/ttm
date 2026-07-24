@@ -1,4 +1,4 @@
-module ttm
+module github.com/vst93/ttm
 
 go 1.25.0
 

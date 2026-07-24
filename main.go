@@ -9,7 +9,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
-	"ttm/server"
+	"github.com/vst93/ttm/server"
 
 	tea "github.com/charmbracelet/bubbletea"
 )

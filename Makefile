@@ -1,5 +1,5 @@
 VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo "dev")
-LD_FLAGS := -w -s -X ttm/server.Version=$(VERSION)
+LD_FLAGS := -w -s -X github.com/vst93/ttm/server.Version=$(VERSION)
 
 .PHONY: build run clean
 
