@@ -238,6 +238,16 @@ func (c *defaultClient) Login() error {
 	}
 	defer session.Close()
 
+	// Disable alternate scroll mode (DEC 1007) before entering raw mode.
+	// BubbleTea's WithAltScreen() enables this implicitly when entering the alt
+	// screen, but exiting the alt screen (via tea.Exec -> ReleaseTerminal) does
+	// not always disable it. If it leaks into the raw SSH session, mouse wheel
+	// and touchpad scroll events are converted to Up/Down arrow key sequences,
+	// which get forwarded to the remote shell and interfere with TUI programs.
+	// We re-enable it after the session ends so BubbleTea's alt screen works
+	// correctly when it re-enters.
+	fmt.Print("\x1b[?1007l")
+
 	fd := int(os.Stdin.Fd())
 	state, err := terminal.MakeRaw(fd)
 	if err != nil {
@@ -392,6 +402,10 @@ func (c *defaultClient) Login() error {
 
 	// SSH 会话结束，恢复终端状态
 	terminal.Restore(fd, state)
+
+	// Re-enable alternate scroll mode so BubbleTea's alt screen works correctly
+	// when it re-enters after RestoreTerminal().
+	fmt.Print("\x1b[?1007h")
 
 	// 清屏并显示光标
 	fmt.Print("\033[2J\033[0;0H\033[?25h")
