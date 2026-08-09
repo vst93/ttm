@@ -63,7 +63,8 @@ func showActionMenu(tty io.Writer, stdinReader io.Reader, loc locale) (uploadAct
 
 // readInputLine reads a line of input with an optional pre-filled default value.
 // Supports full UTF-8 input including Chinese characters.
-func readInputLine(tty io.Writer, stdinReader io.Reader, defaultVal string) string {
+// When tabComplete is non-nil, Tab triggers path completion.
+func readInputLine(tty io.Writer, stdinReader io.Reader, defaultVal string, tabComplete func(string) (string, []string)) string {
 	input := []rune(defaultVal)
 	modified := false
 	if len(input) > 0 {
@@ -114,6 +115,22 @@ func readInputLine(tty io.Writer, stdinReader io.Reader, defaultVal string) stri
 		}
 
 		switch r {
+		case '\t': // Tab completion (if tabComplete is provided)
+			if tabComplete != nil {
+				if !modified && len(input) > 0 {
+					clearInputLine(tty, input)
+					input = input[:0]
+					modified = true
+				}
+				curInput := string(input)
+				completed, _ := tabComplete(curInput)
+				if completed != curInput && completed != "" {
+					clearInputLine(tty, input)
+					input = []rune(completed)
+					fmt.Fprintf(tty, "%s", completed)
+				}
+			}
+
 		case '\r', '\n': // Enter
 			fmt.Fprintf(tty, "\r\n")
 			return strings.TrimSpace(string(input))
@@ -318,6 +335,90 @@ func normalizeRemotePathInput(s string) string {
 	return strings.TrimRight(s, "/")
 }
 
+// localEntry is one path-completion candidate from the local filesystem.
+type localEntry struct {
+	name  string
+	isDir bool
+}
+
+// listLocalEntries lists direct children of dir and marks directories.
+func listLocalEntries(dir string) ([]localEntry, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var result []localEntry
+	for _, e := range entries {
+		name := e.Name()
+		if name == "" || name == "." || name == ".." {
+			continue
+		}
+		result = append(result, localEntry{
+			name:  name,
+			isDir: e.IsDir(),
+		})
+	}
+	return result, nil
+}
+
+// localTabComplete performs Tab completion for local paths.
+// Returns the completed path and a list of matches.
+func localTabComplete(input string) (string, []string) {
+	// Split input into directory and partial filename.
+	dir := filepath.Dir(input)
+	if input == "" {
+		dir = "."
+	}
+	prefix := filepath.Base(input)
+	if strings.HasSuffix(input, "/") {
+		dir = input
+		prefix = ""
+	}
+	// On Windows, also handle backslash suffix.
+	if runtime.GOOS == "windows" && strings.HasSuffix(input, `\`) {
+		dir = input
+		prefix = ""
+	}
+
+	entries, err := listLocalEntries(dir)
+	if err != nil {
+		return input, nil
+	}
+
+	var matches []string
+	var firstMatch localEntry
+	foundFirst := false
+	for _, entry := range entries {
+		if entry.name == "" || entry.name == "." || entry.name == ".." {
+			continue
+		}
+		if prefix != "" && !strings.HasPrefix(entry.name, prefix) {
+			continue
+		}
+		matches = append(matches, entry.name)
+		if !foundFirst {
+			firstMatch = entry
+			foundFirst = true
+		}
+	}
+
+	if !foundFirst {
+		return input, nil
+	}
+
+	var completed string
+	if dir == "." {
+		completed = firstMatch.name
+	} else {
+		completed = filepath.Join(dir, firstMatch.name)
+	}
+	if firstMatch.isDir {
+		completed += string(filepath.Separator)
+	}
+
+	return completed, matches
+}
+
 func normalizeLocalPathInput(s string) string {
 	s = strings.TrimSpace(s)
 	s = trimMatchingQuotes(s)
@@ -470,7 +571,7 @@ func uniqueLocalPath(path string) string {
 }
 
 // showUploadInputs draws the remote dir and local path fields.
-func showUploadInputs(tty io.Writer, stdinReader io.Reader, defaultRemoteDir string, dirDetected bool, loc locale) (string, string, bool) {
+func showUploadInputs(tty io.Writer, stdinReader io.Reader, client *ssh.Client, defaultRemoteDir string, dirDetected bool, loc locale) (string, string, bool) {
 	remoteLabel := localeT(loc, "Remote", "远程")
 	localLabel := localeT(loc, "Local ", "本地 ")
 
@@ -478,21 +579,21 @@ func showUploadInputs(tty io.Writer, stdinReader io.Reader, defaultRemoteDir str
 	if dirDetected {
 		detectedTag := localeT(loc, "(detected)", "(已检测)")
 		fmt.Fprintf(tty, "  %s: \x1b[32m%s\x1b[0m\r\n", remoteLabel, detectedTag)
-		fmt.Fprintf(tty, "  \x1b[2m%s\x1b[0m", localeT(loc, "Press Enter to accept, or type a new path: ", "按 Enter 接受，或输入新路径："))
+		fmt.Fprintf(tty, "  \x1b[2m%s\x1b[0m", localeT(loc, "Press Enter to accept, or type a new path (Tab to complete): ", "按 Enter 接受，或输入新路径（Tab 补全）："))
 	} else {
 		fallbackTag := localeT(loc, "(home, type to override)", "(home 目录，可输入覆盖)")
-		fmt.Fprintf(tty, "  %s: \x1b[33m%s\x1b[0m ", remoteLabel, fallbackTag)
+		fmt.Fprintf(tty, "  %s: \x1b[33m%s\x1b[0m \x1b[2m%s\x1b[0m ", remoteLabel, fallbackTag, localeT(loc, "(Tab to complete)", "(Tab 补全)"))
 	}
 
-	remoteDir := normalizeRemotePathInput(readInputLine(tty, stdinReader, defaultRemoteDir))
+	remoteDir := normalizeRemotePathInput(readRemotePath(tty, stdinReader, client, defaultRemoteDir))
 	if remoteDir == "" {
 		cancelMsg := localeT(loc, "cancelled", "已取消")
 		fmt.Fprintf(tty, "\x1b[2m%s\x1b[0m\r\n", cancelMsg)
 		return "", "", false
 	}
 
-	fmt.Fprintf(tty, "  %s: ", localLabel)
-	localPath := normalizeLocalPathInput(readInputLine(tty, stdinReader, ""))
+	fmt.Fprintf(tty, "  %s: \x1b[2m%s\x1b[0m ", localLabel, localeT(loc, "(Tab to complete)", "(Tab 补全)"))
+	localPath := normalizeLocalPathInput(readInputLine(tty, stdinReader, "", localTabComplete))
 	if localPath == "" {
 		cancelMsg := localeT(loc, "cancelled (empty path)", "已取消（路径为空）")
 		fmt.Fprintf(tty, "\x1b[2m%s\x1b[0m\r\n", cancelMsg)
@@ -565,7 +666,7 @@ func handleCopyAction(tty io.Writer, info sshConnInfo, remoteDir string, loc loc
 
 // handleUploadAction prompts for remote dir + local path and uploads.
 func handleUploadAction(tty io.Writer, stdinReader io.Reader, client *ssh.Client, info sshConnInfo, defaultRemoteDir string, dirDetected bool, loc locale) {
-	remoteDir, localPath, ok := showUploadInputs(tty, stdinReader, defaultRemoteDir, dirDetected, loc)
+	remoteDir, localPath, ok := showUploadInputs(tty, stdinReader, client, defaultRemoteDir, dirDetected, loc)
 	if !ok {
 		printEndBanner(tty, loc)
 		return
@@ -1413,7 +1514,7 @@ func handleDownloadAction(tty io.Writer, stdinReader io.Reader, client *ssh.Clie
 	defaultLocal := getDownloadsDir()
 	localLabel := localeT(loc, "Local save dir", "本地保存目录")
 	fmt.Fprintf(tty, "  %s: ", localLabel)
-	localDir := normalizeLocalPathInput(readInputLine(tty, stdinReader, defaultLocal))
+	localDir := normalizeLocalPathInput(readInputLine(tty, stdinReader, defaultLocal, localTabComplete))
 	if localDir == "" {
 		localDir = defaultLocal
 	}
