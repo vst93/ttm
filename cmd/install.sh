@@ -10,6 +10,7 @@ API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest
 FORCE_INSTALL="${FORCE_INSTALL:-0}"
 SKIP_GITHUB="${SKIP_GITHUB:-0}"
 AUTO_DELETE_INSTALL_SCRIPT="${AUTO_DELETE_INSTALL_SCRIPT:-1}"
+PREVIEW="${TTM_PREVIEW:-0}"
 
 GITHUB_MIRRORS=(
     "https://ghfast.top"
@@ -145,12 +146,14 @@ ${B}Options:${R}
   ${GRN}    --force${R}             $(t "Force install on checksum fail" "校验失败时强制安装")
   ${GRN}    --lang${R} <en|zh>      $(t "Set language" "设置语言")
   ${GRN}    --skip-github${R}       $(t "Skip GitHub direct download, use mirrors only" "跳过 GitHub 直连下载，仅使用镜像")
+  ${GRN}    --preview${R}            $(t "Install latest pre-release version" "安装预览版")
 
 ${B}Env vars:${R}
   ${YLW}INSTALL_DIR${R}             $(t "Same as --install-dir" "等同于 --install-dir")
   ${YLW}FORCE_INSTALL${R}=1         $(t "Same as --force" "等同于 --force")
   ${YLW}SKIP_GITHUB${R}=1           $(t "Same as --skip-github" "等同于 --skip-github")
   ${YLW}TTM_LANG${R}=en|zh          $(t "Set language" "设置语言")
+  ${YLW}TTM_PREVIEW${R}=1           $(t "Same as --preview" "等同于 --preview")
 EOF
 }
 
@@ -163,13 +166,14 @@ parse_args() {
                 INSTALL_DIR="$2"; shift ;;
             --force) FORCE_INSTALL="1" ;;
             --skip-github) SKIP_GITHUB="1" ;;
+            --preview) PREVIEW="1" ;;
             --lang)
                 [ "$#" -lt 2 ] && { log_error "$(t "--lang requires value: en|zh" "--lang 需要值: en|zh")"; exit 2; }
                 case "$2" in en|zh) LANG="$2" ;; *) log_error "$(t "Invalid: $2" "无效: $2")"; exit 2 ;; esac
                 shift ;;
             *)
                 log_error "$(t "Unknown option: $1" "未知参数: $1")"
-                log_error "$(t "Available: --help, --install-dir, --force, --skip-github, --lang" "可用: --help, --install-dir, --force, --skip-github, --lang")"
+                log_error "$(t "Available: --help, --install-dir, --force, --skip-github, --lang, --preview" "可用: --help, --install-dir, --force, --skip-github, --lang, --preview")"
                 exit 2 ;;
         esac
         shift
@@ -419,6 +423,44 @@ fetch_latest_version() {
     return 1
 }
 
+fetch_preview_version() {
+    local response version
+    local releases_url="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases?per_page=10"
+
+    spinner_start "$(t "Version (preview API)" "版本 (预览 API)")"
+    response=""
+    if has_cmd curl; then
+        response="$(curl -fsSL --connect-timeout 8 --max-time 15 "$releases_url" 2>/dev/null)" || true
+    elif has_cmd wget; then
+        response="$(wget -qO- --timeout=15 "$releases_url" 2>/dev/null)" || true
+    fi
+
+    if [ -n "$response" ]; then
+        if has_cmd jq; then
+            version="$(printf '%s\n' "$response" | jq -r 'first(.[] | select(.prerelease == true) | .tag_name) // empty' 2>/dev/null | sed 's/^v//')"
+        elif has_cmd python3; then
+            version="$(printf '%s\n' "$response" | python3 -c "import sys,json; rs=json.load(sys.stdin); print(next((r['tag_name'].lstrip('v') for r in rs if r.get('prerelease')), ''))" 2>/dev/null)"
+        else
+            # Fallback without jq: releases are newest-first; print the tag_name of the
+            # first release whose prerelease flag is true (tag_name precedes prerelease)
+            version="$(printf '%s\n' "$response" | awk '
+                /"tag_name"[[:space:]]*:/ { tag=$0; sub(/.*"tag_name"[[:space:]]*:[[:space:]]*"v?/, "", tag); sub(/"[^"]*$/, "", tag) }
+                /"prerelease"[[:space:]]*:[[:space:]]*true/ { print tag; exit }
+            ')"
+        fi
+        if [ -n "$version" ]; then
+            VERSION="$version"
+            spinner_stop
+            log_info "$(t "Preview version: $VERSION" "预览版本: $VERSION")"
+            return 0
+        fi
+    fi
+    spinner_stop
+
+    log_error "$(t "No pre-release version found" "未找到预览版本")"
+    return 1
+}
+
 detect_platform() {
     local uname_s uname_m
     uname_s="$(uname -s)"
@@ -603,7 +645,11 @@ main() {
     require_extract_tool
 
     log_step "$(t "Version" "获取版本")"
-    fetch_latest_version
+    if [ "$PREVIEW" = "1" ]; then
+        fetch_preview_version
+    else
+        fetch_latest_version
+    fi
 
     log_step "$(t "Platform" "检测平台")"
     detect_platform

@@ -8,12 +8,14 @@
 #   $env:INSTALL_DIR=path    Custom install directory
 #   $env:TTM_LANG=zh         Set language (en/zh)
 #   $env:NO_SHORTCUTS=1      Skip creating desktop/start menu shortcuts
+#   $env:TTM_PREVIEW=1     Install latest pre-release version
 
 $InstallDir = $env:INSTALL_DIR
 $Force = $env:FORCE_INSTALL -eq '1'
 $Lang = $env:TTM_LANG
 $SkipGitHub = $env:SKIP_GITHUB -eq '1'
 $NoShortcuts = $env:NO_SHORTCUTS -eq '1'
+$Preview = $env:TTM_PREVIEW -eq '1'
 
 $ErrorActionPreference = "Stop"
 
@@ -52,6 +54,7 @@ $Z = @{
     SHA_OK         = U(230,160,161,233,170,140,32,79,75)
     SHA_MISMATCH   = U(230,160,161,233,170,140,228,184,141,229,140,185,233,133,141)
     NO_CHECKSUM    = U(230,151,160,230,179,149,232,142,183,229,143,150,230,160,161,233,170,140,228,191,161,230,129,175,239,188,140,230,150,135,228,187,182,229,174,140,230,149,180,230,128,167,230,156,170,231,159,165)
+    PREVIEW_NONE   = U(230,156,170,230,137,190,229,136,176,233,162,132,232,167,136,231,137,136,230,156,172)
     CONTINUE       = U(230,152,175,229,144,166,231,187,167,231,187,173,239,188,159)
     ADDED_PATH     = U(229,183,178,230,183,187,229,138,160,229,136,176,80,65,84,72,40,233,135,141,229,144,175,231,187,136,231,171,175,231,148,159,230,149,136,41)
     EXTRACTING     = U(232,167,163,229,142,139,228,184,173)
@@ -195,6 +198,26 @@ function Get-LatestVersion {
         $version = $json.tag_name -replace '^v', ''
         Log-Info "$(t 'Latest version: ' $Z.LATEST_VER)$version"
         return $version
+    } catch {
+        Log-Error "$(t 'Failed' $Z.FAILED)"
+        exit 1
+    }
+}
+
+function Get-PreviewVersion {
+    Log-Info "Trying API for pre-release..."
+    try {
+        $releasesUrl = "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases?per_page=10"
+        $response = Invoke-WebRequest -Uri $releasesUrl -UseBasicParsing -TimeoutSec 15
+        $json = $response.Content | ConvertFrom-Json
+        $preview = $json | Where-Object { $_.prerelease -eq $true } | Select-Object -First 1
+        if ($preview -and $preview.tag_name) {
+            $version = $preview.tag_name -replace '^v', ''
+            Log-Info "$(t 'Preview version: ' $Z.LATEST_VER)$version"
+            return $version
+        }
+        Log-Error "$(t 'No pre-release version found' $Z.PREVIEW_NONE)"
+        exit 1
     } catch {
         Log-Error "$(t 'Failed' $Z.FAILED)"
         exit 1
@@ -525,7 +548,11 @@ function Main {
     Write-Host ""
     
     Log-Step "$(t 'Version' $Z.VERSION)"
-    $version = Get-LatestVersion
+    if ($Preview) {
+        $version = Get-PreviewVersion
+    } else {
+        $version = Get-LatestVersion
+    }
     
     Log-Step "$(t 'Platform' $Z.PLATFORM)"
     $arch = Get-Platform
