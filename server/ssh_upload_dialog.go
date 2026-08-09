@@ -65,6 +65,7 @@ func showActionMenu(tty io.Writer, stdinReader io.Reader, loc locale) (uploadAct
 // Supports full UTF-8 input including Chinese characters.
 func readInputLine(tty io.Writer, stdinReader io.Reader, defaultVal string) string {
 	input := []rune(defaultVal)
+	modified := false
 	if len(input) > 0 {
 		fmt.Fprintf(tty, "%s", string(input))
 	}
@@ -129,6 +130,7 @@ func readInputLine(tty io.Writer, stdinReader io.Reader, defaultVal string) stri
 				w := runeWidth(last)
 				fmt.Fprint(tty, strings.Repeat("\b", w)+strings.Repeat(" ", w)+strings.Repeat("\b", w))
 			}
+			modified = true
 
 		case 0x15: // Ctrl+U — clear line
 			for len(input) > 0 {
@@ -137,8 +139,15 @@ func readInputLine(tty io.Writer, stdinReader io.Reader, defaultVal string) stri
 				w := runeWidth(last)
 				fmt.Fprint(tty, strings.Repeat("\b", w)+strings.Repeat(" ", w)+strings.Repeat("\b", w))
 			}
+			modified = true
 
 		default:
+			if !modified && len(input) > 0 {
+				// First printable char: clear pre-filled default, start fresh.
+				clearInputLine(tty, input)
+				input = input[:0]
+				modified = true
+			}
 			input = append(input, r)
 			fmt.Fprintf(tty, "%s", string(r))
 		}
@@ -167,6 +176,7 @@ func runeWidth(r rune) int {
 // Results are cached to avoid repeated SSH calls.
 func readRemotePath(tty io.Writer, stdinReader io.Reader, client *ssh.Client, defaultVal string) string {
 	input := []rune(defaultVal)
+	modified := false
 
 	// Cache for Tab completion results.
 	var (
@@ -221,6 +231,12 @@ func readRemotePath(tty io.Writer, stdinReader io.Reader, client *ssh.Client, de
 
 		switch r {
 		case '\t': // Tab — remote path completion
+			if !modified && len(input) > 0 {
+				// First Tab: clear pre-filled default, start fresh.
+				clearInputLine(tty, input)
+				input = input[:0]
+				modified = true
+			}
 			curInput := string(input)
 			var completed string
 
@@ -263,13 +279,21 @@ func readRemotePath(tty io.Writer, stdinReader io.Reader, client *ssh.Client, de
 			}
 			// Invalidate cache on input change.
 			cacheInput = ""
+			modified = true
 
 		case 0x15: // Ctrl+U
 			clearInputLine(tty, input)
 			input = nil
 			cacheInput = ""
+			modified = true
 
 		default:
+			if !modified && len(input) > 0 {
+				// First printable char: clear pre-filled default, start fresh.
+				clearInputLine(tty, input)
+				input = input[:0]
+				modified = true
+			}
 			input = append(input, r)
 			fmt.Fprintf(tty, "%s", string(r))
 			// Invalidate cache on input change.
@@ -453,7 +477,7 @@ func showUploadInputs(tty io.Writer, stdinReader io.Reader, defaultRemoteDir str
 	// Show detection status.
 	if dirDetected {
 		detectedTag := localeT(loc, "(detected)", "(已检测)")
-		fmt.Fprintf(tty, "  %s: %s \x1b[32m%s\x1b[0m\r\n", remoteLabel, defaultRemoteDir, detectedTag)
+		fmt.Fprintf(tty, "  %s: \x1b[32m%s\x1b[0m\r\n", remoteLabel, detectedTag)
 		fmt.Fprintf(tty, "  \x1b[2m%s\x1b[0m", localeT(loc, "Press Enter to accept, or type a new path: ", "按 Enter 接受，或输入新路径："))
 	} else {
 		fallbackTag := localeT(loc, "(home, type to override)", "(home 目录，可输入覆盖)")
