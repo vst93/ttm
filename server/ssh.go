@@ -253,7 +253,15 @@ func (c *defaultClient) Login() error {
 	if err != nil {
 		return fmt.Errorf("enable local raw terminal mode: %w", err)
 	}
-	defer terminal.Restore(fd, state)
+
+	// Defer terminal cleanup: restore termios, re-enable alt scroll, clear screen.
+	// This runs on ALL exit paths (normal, error, panic) ensuring the terminal
+	// is always left in a consistent state for BubbleTea's RestoreTerminal().
+	defer func() {
+		terminal.Restore(fd, state)
+		fmt.Print("\x1b[?1007h")
+		fmt.Print("\033[2J\033[0;0H\033[?25h")
+	}()
 
 	// Read the local VERASE character before MakeRaw overrides it,
 	// so we can forward it to the remote PTY. This ensures Backspace/Delete
@@ -272,8 +280,8 @@ func (c *defaultClient) Login() error {
 	setSessionEnv(session)
 	modes := ssh.TerminalModes{
 		ssh.ECHO:          1,
-		ssh.TTY_OP_ISPEED: 14400,
-		ssh.TTY_OP_OSPEED: 14400,
+		ssh.TTY_OP_ISPEED: 38400,
+		ssh.TTY_OP_OSPEED: 38400,
 	}
 	if eraseChar != 0 {
 		modes[ssh.VERASE] = uint32(eraseChar)
@@ -399,16 +407,6 @@ func (c *defaultClient) Login() error {
 	if waitErr != nil {
 		return fmt.Errorf("remote shell exited: %w", waitErr)
 	}
-
-	// SSH 会话结束，恢复终端状态
-	terminal.Restore(fd, state)
-
-	// Re-enable alternate scroll mode so BubbleTea's alt screen works correctly
-	// when it re-enters after RestoreTerminal().
-	fmt.Print("\x1b[?1007h")
-
-	// 清屏并显示光标
-	fmt.Print("\033[2J\033[0;0H\033[?25h")
 
 	return nil
 }
