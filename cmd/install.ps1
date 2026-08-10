@@ -212,7 +212,7 @@ function Get-PreviewVersion {
         $json = $response.Content | ConvertFrom-Json
         $preview = $json | Where-Object { $_.prerelease -eq $true } | Select-Object -First 1
         if ($preview -and $preview.tag_name) {
-            $version = $preview.tag_name -replace '^v', ''
+            $version = $preview.tag_name
             Log-Info "$(t 'Preview version: ' $Z.LATEST_VER)$version"
             return $version
         }

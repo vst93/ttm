@@ -437,14 +437,14 @@ fetch_preview_version() {
 
     if [ -n "$response" ]; then
         if has_cmd jq; then
-            version="$(printf '%s\n' "$response" | jq -r 'first(.[] | select(.prerelease == true) | .tag_name) // empty' 2>/dev/null | sed 's/^v//')"
+            version="$(printf '%s\n' "$response" | jq -r 'first(.[] | select(.prerelease == true) | .tag_name) // empty' 2>/dev/null)"
         elif has_cmd python3; then
-            version="$(printf '%s\n' "$response" | python3 -c "import sys,json; rs=json.load(sys.stdin); print(next((r['tag_name'].lstrip('v') for r in rs if r.get('prerelease')), ''))" 2>/dev/null)"
+            version="$(printf '%s\n' "$response" | python3 -c "import sys,json; rs=json.load(sys.stdin); print(next((r['tag_name'] for r in rs if r.get('prerelease')), ''))" 2>/dev/null)"
         else
             # Fallback without jq: releases are newest-first; print the tag_name of the
             # first release whose prerelease flag is true (tag_name precedes prerelease)
             version="$(printf '%s\n' "$response" | awk '
-                /"tag_name"[[:space:]]*:/ { tag=$0; sub(/.*"tag_name"[[:space:]]*:[[:space:]]*"v?/, "", tag); sub(/"[^"]*$/, "", tag) }
+                /"tag_name"[[:space:]]*:/ { tag=$0; sub(/.*"tag_name"[[:space:]]*:[[:space:]]*"/, "", tag); sub(/"[^"]*$/, "", tag) }
                 /"prerelease"[[:space:]]*:[[:space:]]*true/ { print tag; exit }
             ')"
         fi
