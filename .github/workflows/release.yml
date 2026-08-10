@@ -51,7 +51,7 @@ jobs:
           export BINARY_NAME="$BINARY_PREFIX$BINARY_SUFFIX"
           export CGO_ENABLED=$( [ "$GOOS" == "android" ] && echo 1 || echo 0 )
           VERSION="${GITHUB_REF#refs/tags/}"
-          go build -o "$GITHUB_WORKSPACE/output/$BINARY_NAME" -trimpath -ldflags "$LD_FLAGS -X ttm/server.Version=$VERSION" .
+          go build -o "$GITHUB_WORKSPACE/output/$BINARY_NAME" -trimpath -ldflags "$LD_FLAGS -X github.com/vst93/ttm/server.Version=$VERSION" .
           
           cd "$GITHUB_WORKSPACE/output"
           ZIP_NAME="$BINARY_PREFIX-$GOOS-$GOARCH.zip"
