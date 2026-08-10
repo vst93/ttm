@@ -207,13 +207,28 @@ get_remote_size() {
     fi
 }
 
-# Format bytes to human readable
+# Format bytes to human readable (pure bash arithmetic, no bc dependency)
 format_size() {
     local bytes=$1
     if [ "$bytes" -ge 1048576 ]; then
-        printf '%.1fMB' "$(echo "$bytes / 1048576" | bc -l)"
+        local int=$(( bytes / 1048576 ))
+        local rem=$(( bytes % 1048576 ))
+        # round to one decimal place: (rem*10 + half-divisor) / divisor
+        local frac=$(( (rem * 10 + 524288) / 1048576 ))
+        if [ "$frac" -eq 10 ]; then
+            int=$(( int + 1 ))
+            frac=0
+        fi
+        printf '%d.%dMB' "$int" "$frac"
     elif [ "$bytes" -ge 1024 ]; then
-        printf '%.1fKB' "$(echo "$bytes / 1024" | bc -l)"
+        local int=$(( bytes / 1024 ))
+        local rem=$(( bytes % 1024 ))
+        local frac=$(( (rem * 10 + 512) / 1024 ))
+        if [ "$frac" -eq 10 ]; then
+            int=$(( int + 1 ))
+            frac=0
+        fi
+        printf '%d.%dKB' "$int" "$frac"
     else
         printf '%dB' "$bytes"
     fi
