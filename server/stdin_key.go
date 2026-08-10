@@ -167,10 +167,16 @@ func readCSIReturning(r io.Reader, readable func(time.Duration) bool) string {
 
 // parseKittyKey inspects a CSI sequence body (the bytes between ESC[ and the
 // final byte) for a kitty keyboard protocol key encoding of the form
-// "<codepoint>[;<modifier>]u". If it encodes Esc (codepoint 27) or Ctrl+C
-// (codepoint 3), it returns the legacy byte (0x1b / 0x03) so the dialog's
-// existing cancel handling works even if the local kitty-keyboard disable
-// didn't take effect. Returns (0,false) for any other sequence.
+// "<codepoint>[;<modifier>]u". If it encodes a key the dialog handles —
+// Esc (27), Ctrl+C (3), Tab (9), Backspace (127), or Enter (13) — it returns
+// the legacy byte so the dialog's existing input/cancel/Tab-completion logic
+// works even if the local kitty-keyboard disable (kittyPushOff) didn't take
+// effect in time. Returns (0,false) for any other sequence.
+//
+// This is critical for Tab completion: under kitty keyboard mode, Tab arrives
+// as ESC[9u instead of raw 0x09. Without recognizing codepoint 9, the CSI
+// sequence is drained (discarded) and the Tab key is silently lost — Tab
+// completion never triggers even though the dialog code handles '	' correctly.
 func parseKittyKey(seq string) (byte, bool) {
 	if !strings.HasSuffix(seq, "u") {
 		return 0, false
@@ -190,6 +196,12 @@ func parseKittyKey(seq string) (byte, bool) {
 		return 0x1b, true
 	case 3: // ETX = Ctrl+C
 		return 0x03, true
+	case 9: // HT = Tab — needed for path completion in dialog inputs
+		return 0x09, true
+	case 13: // CR = Enter
+		return 0x0d, true
+	case 127: // DEL = Backspace
+		return 0x7f, true
 	}
 	return 0, false
 }

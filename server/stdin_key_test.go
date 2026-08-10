@@ -172,15 +172,19 @@ func TestParseKittyKey(t *testing.T) {
 		wantB byte
 		want  bool
 	}{
-		{"27u", 0x1b, true},   // Esc
-		{"27;1u", 0x1b, true}, // Esc (explicit mod 1)
-		{"3;5u", 0x03, true},  // Ctrl+C (codepoint 3, control mod)
-		{"3u", 0x03, true},    // Ctrl+C (no modifier)
-		{"103;5u", 0, false},  // Ctrl+G — not a cancel key in dialogs
-		{"97u", 0, false},     // 'a' — not a cancel key
-		{"5A", 0, false},      // CSI cuu (arrow up) — not kitty-u
-		{"", 0, false},        // empty
-		{"27", 0, false},      // no 'u' suffix
+		{"27u", 0x1b, true},    // Esc
+		{"27;1u", 0x1b, true},  // Esc (explicit mod 1)
+		{"3;5u", 0x03, true},   // Ctrl+C (codepoint 3, control mod)
+		{"3u", 0x03, true},     // Ctrl+C (no modifier)
+		{"9u", 0x09, true},     // Tab (codepoint 9)
+		{"9;5u", 0x09, true},   // Ctrl+I = Tab (codepoint 9, control mod)
+		{"13u", 0x0d, true},    // Enter (codepoint 13)
+		{"127u", 0x7f, true},   // Backspace (codepoint 127)
+		{"103;5u", 0, false},   // Ctrl+G - not a dialog key
+		{"97u", 0, false},      // 'a' - not a dialog key
+		{"5A", 0, false},       // CSI cuu (arrow up) - not kitty-u
+		{"", 0, false},         // empty
+		{"27", 0, false},       // no 'u' suffix
 	}
 	for _, c := range cases {
 		gotB, got := parseKittyKey(c.seq)
@@ -215,6 +219,37 @@ func TestReadSignificantByteKittyCtrlC(t *testing.T) {
 		got, ok = readSignificantByte(r)
 		if !ok || got != 'x' {
 			t.Errorf("after kitty Ctrl+C, got (0x%02x,%v), want 'x'", got, ok)
+		}
+	})
+}
+
+func TestReadSignificantByteKittyTab(t *testing.T) {
+	// kitty-encoded Tab: ESC[9u -> should synthesize 0x09 (Tab).
+	// Without this, Tab completion in path input fields is silently lost
+	// when kitty keyboard mode is active (even with kittyPushOff, which
+	// may not take effect before the first keypress).
+	data := []byte{0x1b, '[', '9', 'u'}
+	r := &bytesReader{b: append(data, 'x')}
+	withReadable(alwaysReadable, func() {
+		got, ok := readSignificantByte(r)
+		if !ok || got != 0x09 {
+			t.Errorf("kitty Tab: got (0x%02x,%v), want (0x09,true)", got, ok)
+		}
+		// Following 'x' still readable.
+		got, ok = readSignificantByte(r)
+		if !ok || got != 'x' {
+			t.Errorf("after kitty Tab, got (0x%02x,%v), want 'x'", got, ok)
+		}
+	})
+}
+
+func TestReadSignificantByteRawTab(t *testing.T) {
+	// Raw 0x09 (Tab in legacy mode) -> should pass through unchanged.
+	r := &bytesReader{b: []byte{0x09, 'x'}}
+	withReadable(alwaysReadable, func() {
+		got, ok := readSignificantByte(r)
+		if !ok || got != 0x09 {
+			t.Errorf("raw Tab: got (0x%02x,%v), want (0x09,true)", got, ok)
 		}
 	})
 }
