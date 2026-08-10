@@ -74,6 +74,7 @@ curl -fsSL https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.sh | bash
 | `--install-dir <dir>` | Install to custom directory |
 | `--force` | Continue even if checksum fails |
 | `--skip-github` | Skip GitHub direct download, use mirrors only |
+| `--preview` | Install latest pre-release version |
 
 **Windows (PowerShell):**
 
@@ -94,6 +95,7 @@ irm https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.ps1 | iex
 | `INSTALL_DIR=path` | Install to custom directory |
 | `TTM_LANG=zh` | Use Chinese interface |
 | `NO_SHORTCUTS=1` | Skip creating desktop/start menu shortcuts |
+| `TTM_PREVIEW=1` | Install latest pre-release version |
 
 > **Tip:** If GitHub access is limited in your region, use `SKIP_GITHUB=1` to skip direct GitHub downloads and use CDN mirrors instead.
 
@@ -275,6 +277,7 @@ curl -fsSL https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.sh | bash
 | `--install-dir <dir>` | 安装到指定目录 |
 | `--force` | 校验失败时继续安装 |
 | `--skip-github` | 跳过 GitHub 直连，仅使用镜像下载 |
+| `--preview` | 安装预览版 |
 
 **Windows (PowerShell)：**
 
@@ -295,6 +298,7 @@ irm https://cdn.jsdelivr.net/gh/vst93/ttm@main/cmd/install.ps1 | iex
 | `INSTALL_DIR=path` | 安装到指定目录 |
 | `TTM_LANG=zh` | 使用中文界面 |
 | `NO_SHORTCUTS=1` | 不创建桌面/开始菜单快捷方式 |
+| `TTM_PREVIEW=1` | 安装预览版 |
 
 > **提示：** 如果您所在地区 GitHub 访问受限，建议使用 `SKIP_GITHUB=1` 跳过 GitHub 直连下载，仅使用 CDN 镜像。
 
