@@ -1,6 +1,20 @@
+name: Release
+
 on:
-  release:
-    types: [created]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g. 0.4.0). Leave empty to bump patch from current.'
+        required: false
+        default: ''
+      notes:
+        description: 'Release notes. Leave empty to auto-generate from commits.'
+        required: false
+        default: ''
+      prerelease:
+        description: 'Mark as pre-release (true/false)'
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -12,15 +26,108 @@ env:
   LD_FLAGS: "-w -s"
 
 jobs:
+  # ── Determine version, create tag, create release ─────────────────────────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      notes: ${{ steps.notes.outputs.notes }}
+      prerelease: ${{ steps.prerelease.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute version
+        id: version
+        run: |
+          CURRENT=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+          CURRENT="${CURRENT#v}"
+          INPUT="${{ inputs.version }}"
+          if [ -n "$INPUT" ]; then
+            VERSION="$INPUT"
+          else
+            BASE_VERSION="${CURRENT%%-*}"
+            MAJOR=$(echo "$BASE_VERSION" | cut -d. -f1)
+            MINOR=$(echo "$BASE_VERSION" | cut -d. -f2)
+            PATCH=$(echo "$BASE_VERSION" | cut -d. -f3)
+            PATCH=$((10#$PATCH + 1))
+            VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Current: $CURRENT -> New: $VERSION"
+
+      - name: Determine prerelease
+        id: prerelease
+        run: |
+          PRERELEASE="${{ inputs.prerelease }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          # Auto-detect prerelease from version string (-alpha/-beta/-preview/-rc)
+          if echo "$VERSION" | grep -qiE '-(alpha|beta|preview|rc)'; then
+            PRERELEASE="true"
+          fi
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        id: notes
+        env:
+          INPUT_NOTES: ${{ inputs.notes }}
+        run: |
+          if [ -n "$INPUT_NOTES" ]; then
+            NOTES="$INPUT_NOTES"
+          else
+            LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            if [ -n "$LAST_TAG" ]; then
+              COMMITS=$(git log "$LAST_TAG..HEAD" --pretty=format:"- %s" --no-merges)
+            else
+              COMMITS=$(git log --pretty=format:"- %s" --no-merges -20)
+            fi
+            NOTES=$(printf '## Changes\n\n%s\n\n---\n\n## Install\n\n| File | Platform |\n|------|----------|\n| `ttm-linux-amd64.zip` | Linux (x86_64) |\n| `ttm-linux-arm64.zip` | Linux (ARM64) |\n| `ttm-darwin-amd64.zip` | macOS (Intel) |\n| `ttm-darwin-arm64.zip` | macOS (Apple Silicon) |\n| `ttm-windows-amd64.zip` | Windows (x86_64) |\n| `ttm-android-arm64.zip` | Android (ARM64) |\n' "$COMMITS")
+            NOTES="${NOTES//\$\{VERSION\}/$VERSION}"
+          fi
+          NOTES="${NOTES//'%'/'%25'}"
+          NOTES="${NOTES//$'\n'/'%0A'}"
+          NOTES="${NOTES//$'\r'/'%0D'}"
+          echo "notes=$NOTES" >> "$GITHUB_OUTPUT"
+
+      - name: Tag and push (no v prefix)
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f "$VERSION"
+          git push origin "$VERSION"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NOTES: ${{ steps.notes.outputs.notes }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          PRERELEASE="${{ steps.prerelease.outputs.prerelease }}"
+          # Decode the percent-encoded notes back to real newlines
+          NOTES=$(printf '%b' "${NOTES//%/\\x}")
+          EXTRA_ARGS=""
+          if [ "$PRERELEASE" = "true" ]; then
+            EXTRA_ARGS="--prerelease"
+          fi
+          gh release create "$VERSION" \
+            --title "ttm $VERSION" \
+            --notes "$NOTES" \
+            --target main \
+            $EXTRA_ARGS
+
+  # ── Build for each platform ───────────────────────────────────────────────
   build:
     name: Build binary CI
     runs-on: ubuntu-latest
+    needs: prepare
     outputs: # 定义输出变量，供后续 job 使用
       sha256_darwin_arm64: ${{ steps.set-outputs.outputs.sha256_darwin_arm64 }}
       sha256_darwin_amd64: ${{ steps.set-outputs.outputs.sha256_darwin_amd64 }}
       sha256_linux_arm64: ${{ steps.set-outputs.outputs.sha256_linux_arm64 }}
       sha256_linux_amd64: ${{ steps.set-outputs.outputs.sha256_linux_amd64 }}
-    
+
     strategy:
       matrix:
         goos: [linux, windows, darwin, android]
@@ -32,15 +139,17 @@ jobs:
       fail-fast: true
     steps:
       - uses: actions/checkout@v4
-      
+        with:
+          ref: ${{ needs.prepare.outputs.version }}
+
       - name: Setup Go environment
         uses: actions/setup-go@v6
         with:
           go-version: 1.25.0
-      
+
       - name: Create output directory
         run: mkdir -p "$GITHUB_WORKSPACE/output"
-      
+
       - name: Build binary file
         env:
           GOOS: ${{ matrix.goos }}
@@ -50,17 +159,17 @@ jobs:
           if [ "$GOOS" == "android" ]; then declare -A goarch2cc=( ["arm64"]="aarch64-linux-android32-clang" ["arm"]="armv7a-linux-androideabi32-clang" ["amd64"]="x86_64-linux-android32-clang" ["386"]="i686-linux-android32-clang"); export CC="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${goarch2cc[$GOARCH]}"; fi
           export BINARY_NAME="$BINARY_PREFIX$BINARY_SUFFIX"
           export CGO_ENABLED=$( [ "$GOOS" == "android" ] && echo 1 || echo 0 )
-          VERSION="${GITHUB_REF#refs/tags/}"
+          VERSION="${{ needs.prepare.outputs.version }}"
           go build -o "$GITHUB_WORKSPACE/output/$BINARY_NAME" -trimpath -ldflags "$LD_FLAGS -X github.com/vst93/ttm/server.Version=$VERSION" .
-          
+
           cd "$GITHUB_WORKSPACE/output"
           ZIP_NAME="$BINARY_PREFIX-$GOOS-$GOARCH.zip"
           zip "$ZIP_NAME" "$BINARY_NAME"
-          
+
           # 计算 SHA256 并保存到文件
           SHA256=$(sha256sum "$ZIP_NAME" | awk '{print $1}')
           echo "$SHA256" > "$ZIP_NAME.sha256"
-          
+
           # 将 SHA256 保存到环境文件，供后续步骤使用
           if [ "$GOOS" == "linux" ] && [ "$GOARCH" == "amd64" ]; then
             echo "SHA256_LINUX_AMD64=$SHA256" >> $GITHUB_ENV
@@ -71,17 +180,17 @@ jobs:
           elif [ "$GOOS" == "darwin" ] && [ "$GOARCH" == "arm64" ]; then
             echo "SHA256_DARWIN_ARM64=$SHA256" >> $GITHUB_ENV
           fi
-          
+
           echo "Built $ZIP_NAME with SHA256: $SHA256"
-      
+
       - name: Upload binaries to release
-        uses: svenstaro/upload-release-action@v2
+        uses: softprops/action-gh-release@v2
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: output/${{ env.BINARY_PREFIX }}*.zip*
-          overwrite: true
+          tag_name: ${{ needs.prepare.outputs.version }}
+          files: output/ttm*.zip*
           file_glob: true
-      
+          fail_on_unmatched_files: false
+
       - name: Set outputs for Homebrew update
         id: set-outputs
         run: |
@@ -94,26 +203,26 @@ jobs:
   update_homebrew:
     name: Update Homebrew formula
     runs-on: ubuntu-latest
-    needs: build  # 依赖 build job
+    needs: [build, prepare]  # 依赖 build 和 prepare job
     steps:
       - name: Checkout tap repository
         uses: actions/checkout@v4
         with:
           repository: vst93/homebrew-tap
           token: ${{ secrets.GITHUB_TOKEN }}
-      
+
       - name: Download template
         run: |
           # 下载模板文件 (假设你有一个模板文件)
           curl -L -o formula-template.rb "https://raw.githubusercontent.com/vst93/homebrew-tap/main/template/formula.tpl" || echo "使用内置模板"
-          
+
           # 如果下载失败，使用内置模板
           if [ ! -f formula-template.rb ]; then
             # 终止当前步骤
             echo "下载模板失败，使用内置模板"
             exit 1
           fi
-      
+
       - name: Update formula with actual values
         run: |
           # 从 build job 获取 SHA256 值
@@ -121,15 +230,15 @@ jobs:
           SHA256_DARWIN_AMD64="${{ needs.build.outputs.sha256_darwin_amd64 }}"
           SHA256_LINUX_ARM64="${{ needs.build.outputs.sha256_linux_arm64 }}"
           SHA256_LINUX_AMD64="${{ needs.build.outputs.sha256_linux_amd64 }}"
-          VERSION="${GITHUB_REF#refs/tags/}"  # 从 tag 获取版本
+          VERSION="${{ needs.prepare.outputs.version }}"  # 从 prepare job 获取版本
           CLEAN_VERSION="${VERSION#v}"  # 去掉 v 前缀
-          
+
           echo "版本: $CLEAN_VERSION"
           echo "SHA256 (darwin-arm64): $SHA256_DARWIN_ARM64"
           echo "SHA256 (darwin-amd64): $SHA256_DARWIN_AMD64"
           echo "SHA256 (linux-arm64): $SHA256_LINUX_ARM64"
           echo "SHA256 (linux-amd64): $SHA256_LINUX_AMD64"
-          
+
           # 替换模板中的变量
           sed -i \
             -e "s/VERSION/$CLEAN_VERSION/g" \
@@ -138,35 +247,35 @@ jobs:
             -e "s/SHA256_LINUX_ARM64/$SHA256_LINUX_ARM64/g" \
             -e "s/SHA256_LINUX_AMD64/$SHA256_LINUX_AMD64/g" \
             formula-template.rb
-          
+
           # 确保 Formula 目录存在
           mkdir -p Formula
-          
+
           # 移动文件到正确位置
           mv formula-template.rb Formula/ttm.rb
-          
+
           # 查看生成的内容
           echo "生成的 Formula 内容:"
           cat Formula/ttm.rb
-      
+
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          branch: update-ttm-${GITHUB_REF#refs/tags/}
+          branch: update-ttm-${{ needs.prepare.outputs.version }}
           base: main
-          title: "Update ttm to ${GITHUB_REF#refs/tags/}"
+          title: "Update ttm to ${{ needs.prepare.outputs.version }}"
           body: |
-            This PR updates the ttm formula to version ${GITHUB_REF#refs/tags/}.
+            This PR updates the ttm formula to version ${{ needs.prepare.outputs.version }}.
             SHA256 values have been automatically calculated for all platforms.
-            
-            - **Release URL**: ${{ github.event.release.html_url }}
+
+            - **Release URL**: https://github.com/vst93/ttm/releases/tag/${{ needs.prepare.outputs.version }}
             - **Platforms updated**:
               - darwin-arm64
               - darwin-amd64
               - linux-arm64
               - linux-amd64
-            
+
             Auto-generated by GitHub Actions.
-          commit-message: "Update ttm to ${GITHUB_REF#refs/tags/}"
+          commit-message: "Update ttm to ${{ needs.prepare.outputs.version }}"
           labels: automated-pr, formula-update
