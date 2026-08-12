@@ -34,6 +34,7 @@ const (
 	editorFieldPassword
 	editorFieldPrivateKey
 	editorFieldPassphrase
+	editorFieldTmuxScroll
 )
 
 const maskedSecretValue = "••••••"
@@ -52,6 +53,7 @@ type bookmarkEditor struct {
 	focusIndex    int
 	authType      authTypeMode
 	authDirty     bool
+	tmuxScroll    string
 	showSecrets   bool
 	secretValues  map[editorField]string
 	secretCleared map[editorField]bool
@@ -253,6 +255,7 @@ func newBookmarkEditor(mode bookmarkEditorMode, index int, existing BookmarkItem
 		mode:        mode,
 		editIndex:   index,
 		authType:    authType,
+		tmuxScroll:  existing.TmuxScroll,
 		showSecrets: false,
 		secretValues: map[editorField]string{
 			editorFieldPassword:   existing.Password,
@@ -274,9 +277,11 @@ func newBookmarkEditor(mode bookmarkEditorMode, index int, existing BookmarkItem
 			buildEditorInput(password, "password"),
 			buildEditorInput(privateKey, "private key or file path"),
 			buildEditorInput(passphrase, "passphrase"),
+			buildEditorInput("", "tmux scroll"),
 		},
 	}
 	editor.inputs[editorFieldAuthType].Blur()
+	editor.inputs[editorFieldTmuxScroll].Blur()
 	editor.setFocus(0)
 	editor.applySecretVisibility()
 	return editor
@@ -366,6 +371,9 @@ func (be *bookmarkEditor) fieldValueForCopy(field editorField) string {
 	if field == editorFieldAuthType {
 		return be.authTypeText(AM.locale)
 	}
+	if field == editorFieldTmuxScroll {
+		return be.tmuxScrollText(AM.locale)
+	}
 	return be.inputs[int(field)].Value()
 }
 
@@ -378,7 +386,7 @@ func (be *bookmarkEditor) modeHint(am *AppModel) string {
 }
 
 func (be *bookmarkEditor) activeFields() []editorField {
-	base := []editorField{editorFieldTitle, editorFieldHost, editorFieldUsername, editorFieldPort, editorFieldAuthType}
+	base := []editorField{editorFieldTitle, editorFieldHost, editorFieldUsername, editorFieldPort, editorFieldAuthType, editorFieldTmuxScroll}
 	switch be.authType {
 	case authTypePassword:
 		return append(base, editorFieldPassword)
@@ -443,6 +451,40 @@ func (be *bookmarkEditor) cycleAuthType() {
 	be.authDirty = true
 }
 
+func (be *bookmarkEditor) tmuxScrollText(locale locale) string {
+	var text string
+	switch be.tmuxScroll {
+	case "on":
+		text = "on"
+	case "off":
+		text = "off"
+	default:
+		text = "default (no change)"
+	}
+	if locale == localeZH {
+		switch be.tmuxScroll {
+		case "on":
+			text = "开启"
+		case "off":
+			text = "关闭"
+		default:
+			text = "默认（不干预）"
+		}
+	}
+	return text
+}
+
+func (be *bookmarkEditor) cycleTmuxScroll() {
+	switch be.tmuxScroll {
+	case "on":
+		be.tmuxScroll = "off"
+	case "off":
+		be.tmuxScroll = ""
+	default:
+		be.tmuxScroll = "on"
+	}
+}
+
 func (be *bookmarkEditor) setFocus(index int) tea.Cmd {
 	fields := be.activeFields()
 	if len(fields) == 0 {
@@ -460,7 +502,7 @@ func (be *bookmarkEditor) setFocus(index int) tea.Cmd {
 	cmds := make([]tea.Cmd, 0, len(fields)+1)
 	cmds = append(cmds, textinput.Blink)
 	for i := range be.inputs {
-		if editorField(i) == focusedField && editorField(i) != editorFieldAuthType {
+		if editorField(i) == focusedField && editorField(i) != editorFieldAuthType && editorField(i) != editorFieldTmuxScroll {
 			cmds = append(cmds, be.inputs[i].Focus())
 			continue
 		}
@@ -608,7 +650,7 @@ func (am *AppModel) handleEditorKey(msg tea.KeyMsg) tea.Cmd {
 	}
 	if isClearFieldKey(msg) {
 		field := AM.editor.focusedField()
-		if field == editorFieldAuthType {
+		if field == editorFieldAuthType || field == editorFieldTmuxScroll {
 			return nil
 		}
 		if isSecretEditorField(field) {
@@ -647,6 +689,11 @@ func (am *AppModel) handleEditorKey(msg tea.KeyMsg) tea.Cmd {
 		if AM.editor.focusedField() == editorFieldPrivateKey && AM.editor.showSecrets {
 			insertIntoPrivateKeyInput("\\n")
 			return nil
+		}
+		// 聚焦 tmux 滚动字段时切换其值，否则切换认证类型
+		if AM.editor.focusedField() == editorFieldTmuxScroll {
+			AM.editor.cycleTmuxScroll()
+			return AM.editor.setFocus(AM.editor.focusIndex)
 		}
 		// 否则切换认证类型
 		AM.editor.cycleAuthType()
@@ -694,6 +741,10 @@ func (am *AppModel) handleEditorKey(msg tea.KeyMsg) tea.Cmd {
 			AM.editor.cycleAuthType()
 			return AM.editor.setFocus(AM.editor.focusIndex)
 		}
+		if AM.editor.focusedField() == editorFieldTmuxScroll {
+			AM.editor.cycleTmuxScroll()
+			return AM.editor.setFocus(AM.editor.focusIndex)
+		}
 	case "pgdown":
 		if AM.editor.viewport.Height > 0 {
 			AM.editor.viewport.LineDown(3)
@@ -719,7 +770,7 @@ func (am *AppModel) handleEditorKey(msg tea.KeyMsg) tea.Cmd {
 		return am.saveEditor()
 	}
 	focusField := AM.editor.focusedField()
-	if focusField == editorFieldAuthType {
+	if focusField == editorFieldAuthType || focusField == editorFieldTmuxScroll {
 		return nil
 	}
 	if isSecretEditorField(focusField) && !AM.editor.showSecrets {
@@ -805,6 +856,7 @@ func (am *AppModel) saveEditor() tea.Cmd {
 	bookmark.Username = strings.TrimSpace(AM.editor.inputs[editorFieldUsername].Value())
 	bookmark.Port = port
 	bookmark.AuthType = "keyboard-interactive"
+	bookmark.TmuxScroll = AM.editor.tmuxScroll
 	strictApply := AM.editor.mode == editorModeAdd || AM.editor.authDirty
 	switch AM.editor.authType {
 	case authTypePassword:
@@ -952,6 +1004,8 @@ func (am *AppModel) editorFieldLabel(field editorField) string {
 		return am.t("Private Key", "私钥")
 	case editorFieldPassphrase:
 		return am.t("Passphrase", "口令")
+	case editorFieldTmuxScroll:
+		return am.t("Tmux Scroll", "Tmux 滚动")
 	default:
 		return ""
 	}
@@ -960,6 +1014,15 @@ func (am *AppModel) editorFieldLabel(field editorField) string {
 func (am *AppModel) editorAuthTypeView() string {
 	current := AM.editor.authTypeText(am.locale)
 	hint := am.t("← → / m switch", "← → / m 切换")
+	valueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)
+	arrowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	return arrowStyle.Render("◂ ") + valueStyle.Render(current) + arrowStyle.Render(" ▸") + "  " + hintStyle.Render(hint)
+}
+
+func (am *AppModel) editorTmuxScrollView() string {
+	current := AM.editor.tmuxScrollText(am.locale)
+	hint := am.t("← → switch", "← → 切换")
 	valueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)
 	arrowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
@@ -1006,6 +1069,8 @@ func (am *AppModel) buildEditorOverlay(frameWidth, frameHeight int) string {
 		body.WriteString("\n")
 		if field == editorFieldAuthType {
 			body.WriteString("  " + am.editorAuthTypeView())
+		} else if field == editorFieldTmuxScroll {
+			body.WriteString("  " + am.editorTmuxScrollView())
 		} else if isFocused {
 			body.WriteString("  " + focusInputStyle.Render(AM.editor.inputs[int(field)].View()))
 		} else {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/muesli/cancelreader"
@@ -59,6 +60,54 @@ func TestIsStdinCopyErrBenign(t *testing.T) {
 	if isStdinCopyErrBenign(errors.New("boom")) {
 		t.Fatalf("expected generic error to be non-benign")
 	}
+}
+
+func withTMUXEnv(t *testing.T, value string, fn func()) {
+	t.Helper()
+	orig, had := os.LookupEnv("TMUX")
+	if had {
+		defer os.Setenv("TMUX", orig)
+	} else {
+		defer os.Unsetenv("TMUX")
+	}
+	if value == "" {
+		os.Unsetenv("TMUX")
+	} else {
+		os.Setenv("TMUX", value)
+	}
+	fn()
+}
+
+func TestTmuxPassthroughNoTmuxEnv(t *testing.T) {
+	withTMUXEnv(t, "", func() {
+		seq := "\x1b[?1007l"
+		if got := tmuxPassthrough(seq); got != seq {
+			t.Fatalf("expected sequence unchanged outside tmux, got %q", got)
+		}
+	})
+}
+
+func TestTmuxPassthroughWrapsAndDoublesESC(t *testing.T) {
+	withTMUXEnv(t, "tmux 3.3a", func() {
+		seq := "\x1b[?1007l"
+		want := "\x1bPtmux;\x1b\x1b[?1007l\x1b\\"
+		if got := tmuxPassthrough(seq); got != want {
+			t.Fatalf("expected wrapped passthrough %q, got %q", want, got)
+		}
+	})
+}
+
+func TestTmuxPassthroughDoublesEveryESC(t *testing.T) {
+	withTMUXEnv(t, "tmux 3.3a", func() {
+		seq := "\x1b[2J\x1b[0;0H\x1b[?25h"
+		got := tmuxPassthrough(seq)
+		if strings.Count(got, "\x1b\x1b") != 3 {
+			t.Fatalf("expected all three ESC bytes doubled, got %q", got)
+		}
+		if !strings.HasPrefix(got, "\x1bPtmux;") || !strings.HasSuffix(got, "\x1b\\") {
+			t.Fatalf("expected tmux passthrough wrapper, got %q", got)
+		}
+	})
 }
 
 func TestSSHTerm(t *testing.T) {

@@ -1163,7 +1163,7 @@ func TestPrivateKeyPreviewKeepsMultilineAfterEnterInShowMode(t *testing.T) {
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
 
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -1205,7 +1205,7 @@ func TestBookmarkEditorCtrlYCopiesFullPrivateKey(t *testing.T) {
 	createList()
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
@@ -1247,7 +1247,7 @@ func TestBookmarkEditorCtrlYCopiesPrivateKeyAfterEnter(t *testing.T) {
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -1291,7 +1291,7 @@ func TestBookmarkEditorCtrlVPastesPrivateKeyWithNewlines(t *testing.T) {
 	createList()
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
@@ -1330,7 +1330,7 @@ func TestBookmarkEditorPasteMultilinePrivateKeyKeepsNewlines(t *testing.T) {
 	createList()
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 
@@ -1370,7 +1370,7 @@ func TestBookmarkEditorPasteSequenceKeepsNewlinesInPrivateKey(t *testing.T) {
 	createList()
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 
@@ -1411,7 +1411,7 @@ func TestBookmarkEditorCollapsedPEMInputKeepsSpaces(t *testing.T) {
 	createList()
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 
@@ -1451,7 +1451,7 @@ func TestBookmarkEditorNewlineRuneSequenceKeepsNewlines(t *testing.T) {
 	createList()
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 
@@ -1492,7 +1492,7 @@ func TestBookmarkEditorEnterSequenceKeepsNewlines(t *testing.T) {
 	createList()
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 
@@ -1526,7 +1526,7 @@ func TestBookmarkEditorPrivateKeyFocusedShowsEscapedNewlineAndCursor(t *testing.
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 
@@ -1589,7 +1589,7 @@ func TestBookmarkEditorPrivateKeyBackspaceRespectsCursorPosition(t *testing.T) {
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 
@@ -1622,7 +1622,7 @@ func TestBookmarkEditorSaveSyncsPrivateKeyFromInput(t *testing.T) {
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 
@@ -1657,7 +1657,7 @@ func TestBookmarkEditorSavePrefersMultilineSecretOverSpaceFlattenedInput(t *test
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 
@@ -1698,7 +1698,7 @@ func TestBookmarkEditorSaveLoadsPrivateKeyFromFilePath(t *testing.T) {
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	AM.editor.inputs[editorFieldPrivateKey].SetValue(keyPath)
@@ -1735,7 +1735,7 @@ func TestBookmarkEditorSaveUnreadablePrivateKeyPathKeepsText(t *testing.T) {
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	AM.editor.inputs[editorFieldPrivateKey].SetValue(missingPath)
@@ -1775,7 +1775,7 @@ func TestBookmarkEditorSaveTooLargePrivateKeyFileKeepsPathText(t *testing.T) {
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	AM.editor.inputs[editorFieldPrivateKey].SetValue(keyPath)
@@ -1808,7 +1808,7 @@ func TestBookmarkEditorPasteThenSaveKeepsPrivateKeyNewlines(t *testing.T) {
 	createList()
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 
@@ -1840,7 +1840,7 @@ func TestBookmarkEditorPasteSequenceThenSaveKeepsPrivateKeyNewlines(t *testing.T
 	createList()
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 
@@ -1886,7 +1886,7 @@ func TestBookmarkEditorPasteMultipleNewlinesKeepsExactTextOnCopyAndSave(t *testi
 	createList()
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 
@@ -1924,7 +1924,7 @@ func TestBookmarkEditorSaveNormalizesEscapedPrivateKeyNewlines(t *testing.T) {
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 
@@ -1958,7 +1958,7 @@ func TestBookmarkEditorCollapsedPEMKeepsSpaces(t *testing.T) {
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 
@@ -1992,7 +1992,7 @@ func TestBookmarkEditorCollapsedTextWithSpacesKeepsSpaces(t *testing.T) {
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 
@@ -2025,7 +2025,7 @@ func TestBookmarkEditorCollapsedPEMWithShortChunksKeepsSpaces(t *testing.T) {
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 
@@ -2059,7 +2059,7 @@ func TestBookmarkEditorCtrlUClearsFocusedField(t *testing.T) {
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
@@ -2089,7 +2089,7 @@ func TestBookmarkEditorCtrlUStringPathClearsFocusedField(t *testing.T) {
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{0x15}})
@@ -2156,7 +2156,7 @@ func TestBookmarkEditorCtrlURawRuneClearsFocusedField(t *testing.T) {
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	_, _ = am.Update(tea.KeyMsg{Runes: []rune{0x15}})
@@ -2203,7 +2203,7 @@ func TestBookmarkEditorCtrlUHiddenModeDoesNotRestoreSecret(t *testing.T) {
 	createList()
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{0x15}})
@@ -2258,7 +2258,7 @@ func TestBookmarkEditorCtrlUHiddenThenRevealStaysEmpty(t *testing.T) {
 	createList()
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{0x15}})
@@ -2492,7 +2492,7 @@ func TestBookmarkEditorEmptyPrivateKeyAutoRevealsOnType(t *testing.T) {
 	createList()
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
@@ -2585,7 +2585,7 @@ func TestEditorAuthModeSwitchShowsOnlyRelevantFields(t *testing.T) {
 		PrivateKey: "",
 	}}
 	AM.width = 90
-	AM.height = 24
+	AM.height = 30
 	createList()
 
 	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
@@ -3129,5 +3129,154 @@ func TestSyncUploadMsgReturnsErrorTipWhenConfigPersistFails(t *testing.T) {
 
 	if !strings.Contains(AM.TipString, "write config") {
 		t.Fatalf("expected config persist error tip, got %q", AM.TipString)
+	}
+}
+
+func TestTmuxScrollCallbackShellsMapping(t *testing.T) {
+	if got := tmuxScrollCallbackShells("on"); len(got) != 1 || got[0].Cmd != "tmux set -g mouse on" || got[0].Delay != 300 {
+		t.Fatalf("unexpected on mapping: %+v", got)
+	}
+	if got := tmuxScrollCallbackShells("off"); len(got) != 1 || got[0].Cmd != "tmux set -g mouse off" || got[0].Delay != 300 {
+		t.Fatalf("unexpected off mapping: %+v", got)
+	}
+	if got := tmuxScrollCallbackShells(""); got != nil {
+		t.Fatalf("expected nil callbacks for empty tmuxScroll, got %+v", got)
+	}
+	if got := tmuxScrollCallbackShells("bogus"); got != nil {
+		t.Fatalf("expected nil callbacks for unknown tmuxScroll, got %+v", got)
+	}
+	if got := tmuxScrollCallbackShells(" on "); len(got) != 1 || got[0].Cmd != "tmux set -g mouse on" {
+		t.Fatalf("expected trimmed on mapping: %+v", got)
+	}
+}
+
+func TestBuildSSHClientWiresTmuxScrollCallbacks(t *testing.T) {
+	client, err := buildSSHClient(BookmarkItem{Host: "h", Username: "u", TmuxScroll: "on"}, 22)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(client.node.CallbackShells) != 1 || client.node.CallbackShells[0].Cmd != "tmux set -g mouse on" {
+		t.Fatalf("expected tmux on callback wired, got %+v", client.node.CallbackShells)
+	}
+
+	client2, err := buildSSHClient(BookmarkItem{Host: "h", Username: "u"}, 22)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client2.node.CallbackShells != nil {
+		t.Fatalf("expected nil callbacks for empty tmuxScroll, got %+v", client2.node.CallbackShells)
+	}
+}
+
+func TestBookmarkEditorTmuxScrollCyclesAndSaves(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	bookmarkDir := setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:     "dev",
+		Host:      "10.0.0.1",
+		Username:  "root",
+		Port:      22,
+		EnableSSH: true,
+	}}
+	AM.width = 100
+	AM.height = 30
+	createList()
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if AM.editor == nil {
+		t.Fatalf("expected editor to open")
+	}
+	// Default is no-op (empty)
+	if got := AM.editor.tmuxScroll; got != "" {
+		t.Fatalf("expected default tmuxScroll empty, got %q", got)
+	}
+	if got := am.editorFieldLabel(editorFieldTmuxScroll); got != "Tmux Scroll" {
+		t.Fatalf("expected EN label, got %q", got)
+	}
+
+	// Tab to the Tmux Scroll field (title, host, username, port, authType, tmuxScroll)
+	for i := 0; i < 5; i++ {
+		_, _ = am.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	if AM.editor.focusedField() != editorFieldTmuxScroll {
+		t.Fatalf("expected focus on tmux scroll field, got %d", AM.editor.focusedField())
+	}
+
+	// Right cycles "" -> "on" -> "off" -> ""
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if got := AM.editor.tmuxScroll; got != "on" {
+		t.Fatalf("expected tmuxScroll on after right, got %q", got)
+	}
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if got := AM.editor.tmuxScroll; got != "off" {
+		t.Fatalf("expected tmuxScroll off after second right, got %q", got)
+	}
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if got := AM.editor.tmuxScroll; got != "" {
+		t.Fatalf("expected tmuxScroll wrap to empty, got %q", got)
+	}
+	// Enter also cycles when focused on the field ("" -> "on")
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := AM.editor.tmuxScroll; got != "on" {
+		t.Fatalf("expected tmuxScroll on after enter, got %q", got)
+	}
+	// Cycle "on" -> "off" -> "" -> "on" for save
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if got := AM.editor.tmuxScroll; got != "off" {
+		t.Fatalf("expected tmuxScroll off, got %q", got)
+	}
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRight})
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if got := AM.editor.tmuxScroll; got != "on" {
+		t.Fatalf("expected tmuxScroll on, got %q", got)
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	if AM.editor != nil {
+		t.Fatalf("expected editor closed after save")
+	}
+	if got := AM.BookmarkInfo.List[0].TmuxScroll; got != "on" {
+		t.Fatalf("expected saved tmuxScroll on, got %q", got)
+	}
+	data, err := os.ReadFile(filepath.Join(bookmarkDir, "bookmarks.json"))
+	if err != nil {
+		t.Fatalf("expected bookmarks file to be written: %v", err)
+	}
+	if !strings.Contains(string(data), "\"tmuxScroll\":\"on\"") {
+		t.Fatalf("expected persisted json to contain tmuxScroll, got %s", string(data))
+	}
+}
+
+func TestBookmarkEditorTmuxScrollLabelI18nAndEditBackfill(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	_ = setupBookmarkTempDir(t)
+
+	AM.BookmarkInfo.List = []BookmarkItem{{
+		Title:      "dev",
+		Host:       "10.0.0.1",
+		Username:   "root",
+		Port:       22,
+		EnableSSH:  true,
+		TmuxScroll: "off",
+	}}
+	AM.width = 100
+	AM.height = 30
+	AM.locale = localeZH
+	createList()
+
+	if got := am.editorFieldLabel(editorFieldTmuxScroll); got != "Tmux 滚动" {
+		t.Fatalf("expected ZH label, got %q", got)
+	}
+
+	_, _ = am.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if AM.editor == nil {
+		t.Fatalf("expected editor to open")
+	}
+	// Edit mode backfills the existing value
+	if got := AM.editor.tmuxScroll; got != "off" {
+		t.Fatalf("expected tmuxScroll backfilled from bookmark, got %q", got)
 	}
 }

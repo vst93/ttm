@@ -147,6 +147,20 @@ func isStdinCopyErrBenign(err error) bool {
 	return errors.Is(err, cancelreader.ErrCanceled)
 }
 
+// tmuxPassthrough wraps a terminal escape sequence in the tmux passthrough
+// wrapper (\x1bPtmux;...\x1b\) when ttm itself runs inside a tmux session
+// (TMUX env var set). Without the wrapper, tmux would swallow the sequence
+// instead of forwarding it to the outer terminal. Inside the wrapper, every
+// ESC byte must be doubled (\x1b\x1b). When not running under tmux, the
+// sequence is returned unchanged.
+func tmuxPassthrough(seq string) string {
+	if os.Getenv("TMUX") == "" {
+		return seq
+	}
+	escaped := strings.ReplaceAll(seq, "\x1b", "\x1b\x1b")
+	return "\x1bPtmux;" + escaped + "\x1b\\"
+}
+
 func (c *defaultClient) ProbeConnection(timeout time.Duration) error {
 	host := c.node.Host
 	port := strconv.Itoa(c.node.Port)
@@ -246,7 +260,7 @@ func (c *defaultClient) Login() error {
 	// which get forwarded to the remote shell and interfere with TUI programs.
 	// We re-enable it after the session ends so BubbleTea's alt screen works
 	// correctly when it re-enters.
-	fmt.Print("\x1b[?1007l")
+	fmt.Print(tmuxPassthrough("\x1b[?1007l"))
 
 	fd := int(os.Stdin.Fd())
 	state, err := terminal.MakeRaw(fd)
@@ -259,8 +273,8 @@ func (c *defaultClient) Login() error {
 	// is always left in a consistent state for BubbleTea's RestoreTerminal().
 	defer func() {
 		terminal.Restore(fd, state)
-		fmt.Print("\x1b[?1007h")
-		fmt.Print("\033[2J\033[0;0H\033[?25h")
+		fmt.Print(tmuxPassthrough("\x1b[?1007h"))
+		fmt.Print(tmuxPassthrough("\033[2J\033[0;0H\033[?25h"))
 	}()
 
 	// Read the local VERASE character before MakeRaw overrides it,

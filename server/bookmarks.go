@@ -17,6 +17,7 @@ type BookmarkItem struct {
 	Username            string `json:"username"`
 	AuthType            string `json:"authType"`
 	Password            string `json:"password"`
+	TmuxScroll          string `json:"tmuxScroll"` // "" | "on" | "off" — remote tmux mouse config after connect
 	Port                int    `json:"port"`
 	LoginScriptDelay    int64  `json:"loginScriptDelay"`
 	Encode              string `json:"encode"`

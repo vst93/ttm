@@ -601,9 +601,27 @@ func buildSSHClient(bookmark BookmarkItem, port int) (*defaultClient, error) {
 		PrivateKey:     bookmark.PrivateKey,
 		Passphrase:     bookmark.Passphrase,
 		Password:       bookmark.Password,
-		CallbackShells: nil,
+		CallbackShells: tmuxScrollCallbackShells(bookmark.TmuxScroll),
 	}
 	return genSSHConfig(sshConfig)
+}
+
+// tmuxScrollCallbackShells maps a bookmark's TmuxScroll setting to remote shell
+// callbacks run shortly after the remote shell starts.
+//   - "on"  → run `tmux set -g mouse on`
+//   - "off" → run `tmux set -g mouse off`
+//   - ""    (anything else) → nil (no intervention)
+//
+// Delay is expressed in milliseconds (Login() multiplies by time.Millisecond).
+func tmuxScrollCallbackShells(tmuxScroll string) []*CallbackShell {
+	switch strings.TrimSpace(tmuxScroll) {
+	case "on":
+		return []*CallbackShell{{Cmd: "tmux set -g mouse on", Delay: 300}}
+	case "off":
+		return []*CallbackShell{{Cmd: "tmux set -g mouse off", Delay: 300}}
+	default:
+		return nil
+	}
 }
 
 func describeConnectError(err error) string {
