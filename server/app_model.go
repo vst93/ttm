@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -210,6 +212,7 @@ type AppModel struct {
 	isConnecting        bool
 	isUpdating          bool
 	isSyncing           bool
+	updateSeq           uint64
 	enterKeyAt          time.Time
 	width               int
 	height              int
@@ -1131,16 +1134,64 @@ func (am *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return am, nil
 	case updateBrewResultMsg:
-		// Brew upgrade completed; overlay already reflects status.
+		if AM.pendingUpdate == nil || msg.ID != AM.pendingUpdate.id || AM.pendingUpdate.dlStatus == dlModelCancelled {
+			return am, nil
+		}
+		AM.pendingUpdate.cancelUpdate = nil
+		if msg.Success {
+			AM.pendingUpdate.dlStatus = dlModelDone
+		} else {
+			AM.pendingUpdate.dlStatus = dlModelFailed
+			AM.pendingUpdate.dlError = msg.Output
+		}
 		return am, nil
+	case updateProgressMsg:
+		if AM.pendingUpdate == nil || msg.ID != AM.pendingUpdate.id || AM.pendingUpdate.dlStatus != dlModelDownloading {
+			return am, nil
+		}
+		AM.pendingUpdate.dlProgress = msg.Progress
+		AM.pendingUpdate.dlDownloaded = msg.Downloaded
+		AM.pendingUpdate.dlTotal = msg.Total
+		return am, waitForUpdateEvent(AM.pendingUpdate.id, AM.pendingUpdate.updateEvents)
 	case updateDownloadResultMsg:
-		// Download/replace completed; overlay already reflects status.
-		// If needSudo was detected, dlModelNeedSudo is already set.
+		if AM.pendingUpdate == nil || msg.ID != AM.pendingUpdate.id || AM.pendingUpdate.dlStatus == dlModelCancelled {
+			return am, nil
+		}
+		s := AM.pendingUpdate
+		s.cancelUpdate = nil
+		s.updateEvents = nil
+		if msg.Success {
+			s.dlProgress = 1
+			s.dlStatus = dlModelDone
+			return am, nil
+		}
+		if msg.NeedSudo {
+			s.dlStatus = dlModelNeedSudo
+			s.dlError = msg.Output
+			s.extractedPath = msg.ExtractedPath
+			s.exePath = msg.ExePath
+			ti := textinput.New()
+			ti.Placeholder = am.t("sudo password", "sudo 密码")
+			ti.EchoMode = textinput.EchoPassword
+			ti.EchoCharacter = '●'
+			ti.CharLimit = 128
+			ti.Focus()
+			s.sudoInput = ti
+			s.needSudoFocus = true
+			return am, nil
+		}
+		s.dlStatus = dlModelFailed
+		s.dlError = msg.Output
 		return am, nil
 	case updateSudoResultMsg:
-		if AM.pendingUpdate != nil {
+		if AM.pendingUpdate != nil && msg.ID == AM.pendingUpdate.id {
+			AM.pendingUpdate.sudoPassword = ""
 			if msg.Success {
 				AM.pendingUpdate.dlStatus = dlModelSudoDone
+				if AM.pendingUpdate.extractedPath != "" {
+					_ = os.RemoveAll(filepath.Dir(AM.pendingUpdate.extractedPath))
+				}
+				AM.pendingUpdate.extractedPath = ""
 			} else {
 				AM.pendingUpdate.dlStatus = dlModelSudoFailed
 				AM.pendingUpdate.sudoOutput = msg.Output
@@ -1275,6 +1326,10 @@ func (am *AppModel) handleUpdatePromptKey(msg tea.KeyMsg) tea.Cmd {
 	if s.dlStatus == dlModelDownloading {
 		switch msg.String() {
 		case "esc", "ctrl+c":
+			if s.cancelUpdate != nil {
+				s.cancelUpdate()
+				s.cancelUpdate = nil
+			}
 			s.dlStatus = dlModelCancelled
 			return setTip(am.t("update cancelled", "已取消更新"), tipInfo)
 		}
@@ -1284,6 +1339,7 @@ func (am *AppModel) handleUpdatePromptKey(msg tea.KeyMsg) tea.Cmd {
 	if s.dlStatus == dlModelDone || s.dlStatus == dlModelFailed || s.dlStatus == dlModelCancelled {
 		switch msg.String() {
 		case "esc", "enter", "q":
+			cleanupPendingUpdate(s)
 			AM.pendingUpdate = nil
 			return nil
 		}
@@ -1299,6 +1355,7 @@ func (am *AppModel) handleUpdatePromptKey(msg tea.KeyMsg) tea.Cmd {
 	if s.dlStatus == dlModelSudoDone || s.dlStatus == dlModelSudoFailed {
 		switch msg.String() {
 		case "esc", "enter", "q":
+			cleanupPendingUpdate(s)
 			AM.pendingUpdate = nil
 			return nil
 		}
@@ -1334,6 +1391,7 @@ func (am *AppModel) handleSudoInputKey(msg tea.KeyMsg) tea.Cmd {
 
 	switch msg.String() {
 	case "esc":
+		cleanupPendingUpdate(s)
 		AM.pendingUpdate = nil
 		return nil
 	case "tab":
@@ -1385,12 +1443,7 @@ func (am *AppModel) runSudoMv() tea.Cmd {
 		return nil
 	}
 
-	// First try the reliably stored sudoOutput (extractedPath exePath),
-	// then fall back to parsing from dlError message.
-	extractedPath, exePath := parseSudoPathsFromOutput(s.sudoOutput)
-	if extractedPath == "" || exePath == "" {
-		extractedPath, exePath = parseSudoPaths(s.dlError)
-	}
+	extractedPath, exePath := s.extractedPath, s.exePath
 	if extractedPath == "" || exePath == "" {
 		s.dlStatus = dlModelSudoFailed
 		s.sudoOutput = am.t("cannot determine binary paths", "无法确定二进制文件路径")
@@ -1398,6 +1451,7 @@ func (am *AppModel) runSudoMv() tea.Cmd {
 	}
 
 	password := s.sudoPassword
+	id := s.id
 	s.dlStatus = dlModelDownloading // reuse "in-progress" visual
 
 	return func() tea.Msg {
@@ -1406,33 +1460,10 @@ func (am *AppModel) runSudoMv() tea.Cmd {
 		out, err := cmd.CombinedOutput()
 		output := strings.TrimSpace(string(out))
 		if err != nil {
-			return updateSudoResultMsg{Success: false, Output: output}
+			return updateSudoResultMsg{ID: id, Success: false, Output: output}
 		}
-		return updateSudoResultMsg{Success: true, Output: output}
+		return updateSudoResultMsg{ID: id, Success: true, Output: output}
 	}
-}
-
-// parseSudoPaths extracts paths from the permission error message line: "sudo mv <src> <dst>"
-func parseSudoPaths(errMsg string) (string, string) {
-	for _, line := range strings.Split(errMsg, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "sudo mv ") {
-			fields := strings.Fields(strings.TrimPrefix(line, "sudo mv "))
-			if len(fields) >= 2 {
-				return fields[0], fields[1]
-			}
-		}
-	}
-	return "", ""
-}
-
-// parseSudoPathsFromOutput extracts paths from the stored "extractedPath exePath" string.
-func parseSudoPathsFromOutput(output string) (string, string) {
-	fields := strings.Fields(output)
-	if len(fields) >= 2 {
-		return fields[0], fields[1]
-	}
-	return "", ""
 }
 
 // startUpdate begins the actual update process based on install method.
@@ -1447,16 +1478,15 @@ func (am *AppModel) startUpdate() tea.Cmd {
 
 	switch r.Method {
 	case installMethodBrew:
+		AM.updateSeq++
+		s.id = AM.updateSeq
+		ctx, cancel := context.WithCancel(context.Background())
+		s.cancelUpdate = cancel
 		s.dlStatus = dlModelDownloading
+		id := s.id
 		return func() tea.Msg {
-			ok, output := brewUpgrade()
-			if ok {
-				s.dlStatus = dlModelDone
-				return updateBrewResultMsg{Success: true, Output: output}
-			}
-			s.dlStatus = dlModelFailed
-			s.dlError = output
-			return updateBrewResultMsg{Success: false, Output: output}
+			ok, output := brewUpgrade(ctx)
+			return updateBrewResultMsg{ID: id, Success: ok, Output: output}
 		}
 
 	default:
@@ -1467,35 +1497,58 @@ func (am *AppModel) startUpdate() tea.Cmd {
 		}
 		s.dlStatus = dlModelDownloading
 		s.dlProgress = 0
-		return func() tea.Msg {
-			ok, msg, needSudo, extractedPath, exePath := performUpdate(r.DownloadURL, r.Latest, func(p float64) {
-				s.dlProgress = p
+		s.dlDownloaded = 0
+		s.dlTotal = 0
+		AM.updateSeq++
+		s.id = AM.updateSeq
+		ctx, cancel := context.WithCancel(context.Background())
+		s.cancelUpdate = cancel
+		events := make(chan tea.Msg, 8)
+		s.updateEvents = events
+		id := s.id
+		go func() {
+			ok, output, needSudo, extractedPath, exePath := performUpdate(ctx, r.DownloadURL, r.Latest, func(progress updateProgressMsg) {
+				progress.ID = id
+				select {
+				case events <- progress:
+				case <-ctx.Done():
+				}
 			})
-			if ok {
-				s.dlStatus = dlModelDone
-				return updateDownloadResultMsg{Success: true, Output: msg}
+			result := updateDownloadResultMsg{
+				ID: id, Success: ok, Output: output, NeedSudo: needSudo,
+				ExtractedPath: extractedPath, ExePath: exePath,
 			}
-			if needSudo {
-				// Store paths in dlError for later parsing, transition to sudo state
-				s.dlStatus = dlModelNeedSudo
-				s.dlError = msg // contains the sudo mv command hint
-				// Also store paths directly for reliability
-				s.sudoOutput = fmt.Sprintf("%s %s", extractedPath, exePath)
-				// Initialize password input
-				ti := textinput.New()
-				ti.Placeholder = am.t("sudo password", "sudo 密码")
-				ti.EchoMode = textinput.EchoPassword
-				ti.EchoCharacter = '●'
-				ti.CharLimit = 128
-				ti.Focus()
-				s.sudoInput = ti
-				s.needSudoFocus = true
-				return nil
+			select {
+			case events <- result:
+			case <-ctx.Done():
 			}
-			s.dlStatus = dlModelFailed
-			s.dlError = msg
-			return updateDownloadResultMsg{Success: false, Output: msg}
+			close(events)
+		}()
+		return waitForUpdateEvent(id, events)
+	}
+}
+
+func waitForUpdateEvent(id uint64, events <-chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-events
+		if !ok {
+			return updateDownloadResultMsg{ID: id, Output: "update task ended unexpectedly"}
 		}
+		return msg
+	}
+}
+
+func cleanupPendingUpdate(s *updatePromptState) {
+	if s == nil {
+		return
+	}
+	if s.cancelUpdate != nil {
+		s.cancelUpdate()
+		s.cancelUpdate = nil
+	}
+	if s.extractedPath != "" {
+		_ = os.RemoveAll(filepath.Dir(s.extractedPath))
+		s.extractedPath = ""
 	}
 }
 
@@ -1564,16 +1617,26 @@ func (am *AppModel) buildUpdatePromptOverlay(frameWidth int) string {
 	statusLine := ""
 	switch s.dlStatus {
 	case dlModelDownloading:
-		pct := int(s.dlProgress * 100)
 		barWidth := 20
-		filled := int(s.dlProgress * float64(barWidth))
-		if filled > barWidth {
-			filled = barWidth
+		if s.dlTotal > 0 {
+			pct := int(s.dlProgress * 100)
+			filled := int(s.dlProgress * float64(barWidth))
+			if filled > barWidth {
+				filled = barWidth
+			}
+			bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+			statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Render(
+				fmt.Sprintf("  ⟳ %s %3d%%  %s/%s", bar, pct, formatFileSize(s.dlDownloaded), formatFileSize(s.dlTotal)),
+			)
+		} else if s.dlDownloaded > 0 {
+			statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Render(
+				fmt.Sprintf(am.t("  ⟳ Downloading... %s", "  ⟳ 正在下载... %s"), formatFileSize(s.dlDownloaded)),
+			)
+		} else {
+			statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Render(
+				am.t("  ⟳ Starting download...", "  ⟳ 正在开始下载..."),
+			)
 		}
-		bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
-		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Render(
-			fmt.Sprintf("  ⟳ %s %3d%%", bar, pct),
-		)
 	case dlModelDone:
 		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("78")).Render(
 			"  ✓ " + am.t("Update complete! Restart ttm to use the new version.", "更新完成！请重启 ttm 以使用新版本。"),

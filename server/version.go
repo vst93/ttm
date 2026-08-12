@@ -2,6 +2,7 @@ package server
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 var Version = "dev"
@@ -44,13 +46,18 @@ type updateCheckMsg struct {
 }
 
 type updateBrewResultMsg struct {
+	ID      uint64
 	Success bool
 	Output  string
 }
 
 type updateDownloadResultMsg struct {
-	Success bool
-	Output  string
+	ID            uint64
+	Success       bool
+	Output        string
+	NeedSudo      bool
+	ExtractedPath string
+	ExePath       string
 }
 
 type installMethod int
@@ -77,25 +84,36 @@ const (
 
 // updatePromptState holds the interactive update confirmation state.
 type updatePromptState struct {
+	id            uint64
 	Result        updateCheckResult
 	confirmed     bool
 	selected      int // 0 = default action, 1 = cancel
 	dlStatus      dlModel
 	dlError       string
 	dlProgress    float64 // 0.0 ~ 1.0
+	dlDownloaded  int64
+	dlTotal       int64
 	sudoPassword  string
 	sudoOutput    string
 	sudoInput     textinput.Model
 	needSudoFocus bool // true when password input is focused
+	extractedPath string
+	exePath       string
+	updateEvents  <-chan tea.Msg
+	cancelUpdate  context.CancelFunc
 }
 
 type updateSudoResultMsg struct {
+	ID      uint64
 	Success bool
 	Output  string
 }
 
 type updateProgressMsg struct {
-	Progress float64
+	ID         uint64
+	Progress   float64
+	Downloaded int64
+	Total      int64
 }
 
 func detectInstallMethod() installMethod {
@@ -241,11 +259,10 @@ func checkUpdate() updateCheckResult {
 	return result
 }
 
-// performUpdate downloads the release zip for the current platform,
-// extracts it, and replaces the running binary.
-// Returns (success, message, needSudo, extractedPath, exePath).
-// onProgress is called with a value between 0.0 and 1.0 during download.
-func performUpdate(downloadURL, latest string, onProgress func(float64)) (bool, string, bool, string, string) {
+// performUpdate downloads the release archive, extracts the platform binary,
+// and installs it. Progress is reported through messages so the Bubble Tea
+// event loop remains the only writer of UI state.
+func performUpdate(ctx context.Context, downloadURL, latest string, onProgress func(updateProgressMsg)) (bool, string, bool, string, string) {
 	if downloadURL == "" {
 		return false, "no download URL for this platform", false, "", ""
 	}
@@ -254,22 +271,40 @@ func performUpdate(downloadURL, latest string, onProgress func(float64)) (bool, 
 	if err != nil {
 		return false, fmt.Sprintf("cannot locate binary: %v", err), false, "", ""
 	}
-	exePath, _ = filepath.EvalSymlinks(exePath)
+	if resolved, resolveErr := filepath.EvalSymlinks(exePath); resolveErr == nil {
+		exePath = resolved
+	}
 
-	// Download to a temp file.
-	tmpDir := os.TempDir()
-	zipPath := filepath.Join(tmpDir, fmt.Sprintf("ttm-%s.zip", latest))
+	tmpDir, err := os.MkdirTemp("", "ttm-update-*")
+	if err != nil {
+		return false, fmt.Sprintf("cannot create temp directory: %v", err), false, "", ""
+	}
+	keepTemp := false
+	defer func() {
+		if !keepTemp {
+			_ = os.RemoveAll(tmpDir)
+		}
+	}()
+
+	zipPath := filepath.Join(tmpDir, fmt.Sprintf("ttm-%s.zip", cleanVersion(latest)))
 
 	out, err := os.Create(zipPath)
 	if err != nil {
 		return false, fmt.Sprintf("cannot create temp file: %v", err), false, "", ""
 	}
 
-	httpClient := &http.Client{Timeout: 60 * time.Second}
-	resp, err := httpClient.Get(downloadURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
 		out.Close()
-		os.Remove(zipPath)
+		return false, fmt.Sprintf("cannot create download request: %v", err), false, "", ""
+	}
+	httpClient := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		out.Close()
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			return false, "update cancelled", false, "", ""
+		}
 		return false, fmt.Sprintf("download failed: %v", err), false, "", ""
 	}
 	defer resp.Body.Close()
@@ -288,35 +323,38 @@ func performUpdate(downloadURL, latest string, onProgress func(float64)) (bool, 
 	}
 	if _, err := io.Copy(out, progressReader); err != nil {
 		out.Close()
-		os.Remove(zipPath)
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			return false, "update cancelled", false, "", ""
+		}
 		return false, fmt.Sprintf("download interrupted: %v", err), false, "", ""
 	}
-	out.Close()
+	if err := out.Close(); err != nil {
+		return false, fmt.Sprintf("cannot finish download: %v", err), false, "", ""
+	}
 
 	// Extract the zip.
 	reader, err := zip.OpenReader(zipPath)
-	os.Remove(zipPath)
 	if err != nil {
 		return false, fmt.Sprintf("cannot open zip: %v", err), false, "", ""
 	}
 	defer reader.Close()
 
 	var extractedPath string
+	wantBinary := "ttm"
+	if runtime.GOOS == "windows" {
+		wantBinary += ".exe"
+	}
 	for _, f := range reader.File {
-		if strings.HasPrefix(f.Name, ".") {
-			continue
-		}
 		info := f.FileInfo()
-		if info.IsDir() {
+		if info.IsDir() || filepath.Base(f.Name) != wantBinary {
 			continue
 		}
-		// We expect a single file named "ttm" (or "ttm.exe").
 		rc, err := f.Open()
 		if err != nil {
 			return false, fmt.Sprintf("cannot extract: %v", err), false, "", ""
 		}
-		extractedPath = filepath.Join(tmpDir, f.Name)
-		extracted, err := os.OpenFile(extractedPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+		extractedPath = filepath.Join(tmpDir, wantBinary)
+		extracted, err := os.OpenFile(extractedPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 		if err != nil {
 			rc.Close()
 			return false, fmt.Sprintf("cannot write temp binary: %v", err), false, "", ""
@@ -334,88 +372,128 @@ func performUpdate(downloadURL, latest string, onProgress func(float64)) (bool, 
 	if extractedPath == "" {
 		return false, "no binary found in archive", false, "", ""
 	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(extractedPath, 0755); err != nil {
+			return false, fmt.Sprintf("cannot make update executable: %v", err), false, "", ""
+		}
+	}
 
-	// Replace the running binary.
-	// On Unix we can overwrite an executing binary; on we rename the old one first.
-	oldPath := exePath + ".old"
-	_ = os.Remove(oldPath)
-
-	// Attempt a direct rename-based swap:
-	//   ttm.current -> ttm.old
-	//   ttm.new     -> ttm.current
-	if err := os.Rename(exePath, oldPath); err != nil {
-		// Check for permission denied.
-		if isPermissionError(err) {
-			if runtime.GOOS == "windows" {
+	if runtime.GOOS == "windows" {
+		if err := checkInstallDirectory(exePath); err != nil {
+			if isPermissionError(err) {
 				return false, windowsPermissionMsg(exePath), false, "", ""
 			}
-			return false, permissionErrorMsg(extractedPath, exePath), true, extractedPath, exePath
+			return false, fmt.Sprintf("cannot prepare update directory: %v", err), false, "", ""
 		}
-		// Fallback: try direct copy if rename fails (e.g. permissions).
-		if err := copyFile(extractedPath, exePath); err != nil {
+		if err := scheduleWindowsUpdate(extractedPath, exePath); err != nil {
 			if isPermissionError(err) {
-				if runtime.GOOS == "windows" {
-					return false, windowsPermissionMsg(exePath), false, "", ""
-				}
-				return false, permissionErrorMsg(extractedPath, exePath), true, extractedPath, exePath
+				return false, windowsPermissionMsg(exePath), false, extractedPath, exePath
 			}
-			os.Remove(extractedPath)
-			return false, fmt.Sprintf("cannot replace binary: %v", err), false, "", ""
+			return false, fmt.Sprintf("cannot schedule update: %v", err), false, "", ""
 		}
-	} else {
-		if err := os.Rename(extractedPath, exePath); err != nil {
-			// Check for permission denied.
-			if isPermissionError(err) {
-				// Rollback the first rename.
-				os.Rename(oldPath, exePath)
-				if runtime.GOOS == "windows" {
-					return false, windowsPermissionMsg(exePath), false, "", ""
-				}
-				return false, permissionErrorMsg(extractedPath, exePath), true, extractedPath, exePath
-			}
-			// Rollback.
-			os.Rename(oldPath, exePath)
-			return false, fmt.Sprintf("cannot install new binary: %v", err), false, "", ""
+		keepTemp = true
+		return true, "close ttm to finish installing the update, then reopen it", false, "", ""
+	}
+
+	if err := installUnixBinary(extractedPath, exePath); err != nil {
+		if isPermissionError(err) {
+			needSudo := runtime.GOOS != "android" && execCommandExists("sudo")
+			keepTemp = needSudo
+			return false, permissionErrorMsg(extractedPath, exePath, needSudo), needSudo, extractedPath, exePath
 		}
-		_ = os.Remove(oldPath)
+		return false, fmt.Sprintf("cannot replace binary: %v", err), false, "", ""
 	}
 
 	return true, "restart ttm to use the new version", false, "", ""
 }
 
-func copyFile(src, dst string) error {
+func checkInstallDirectory(exePath string) error {
+	probe, err := os.CreateTemp(filepath.Dir(exePath), ".ttm-write-check-*")
+	if err != nil {
+		return err
+	}
+	name := probe.Name()
+	if err := probe.Close(); err != nil {
+		_ = os.Remove(name)
+		return err
+	}
+	return os.Remove(name)
+}
+
+func installUnixBinary(src, dst string) error {
+	staged, err := os.CreateTemp(filepath.Dir(dst), ".ttm-update-*")
+	if err != nil {
+		return err
+	}
+	stagedPath := staged.Name()
+	defer os.Remove(stagedPath)
+
 	in, err := os.Open(src)
 	if err != nil {
+		staged.Close()
 		return err
 	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
-	if err != nil {
+	_, copyErr := io.Copy(staged, in)
+	closeInErr := in.Close()
+	syncErr := staged.Sync()
+	chmodErr := staged.Chmod(0755)
+	closeOutErr := staged.Close()
+	for _, candidate := range []error{copyErr, closeInErr, syncErr, chmodErr, closeOutErr} {
+		if candidate != nil {
+			return candidate
+		}
+	}
+	return os.Rename(stagedPath, dst)
+}
+
+func scheduleWindowsUpdate(src, dst string) error {
+	helperPath := filepath.Join(filepath.Dir(src), "finish-update.cmd")
+	script := fmt.Sprintf("@echo off\r\n:retry\r\nmove /Y %s %s >nul 2>&1\r\nif errorlevel 1 (\r\n  timeout /t 1 /nobreak >nul\r\n  goto retry\r\n)\r\ndel /Q \"%%~dp0*.zip\" >nul 2>&1\r\ndel /Q \"%%~f0\"\r\nrmdir \"%%~dp0.\" >nul 2>&1\r\n", windowsQuote(src), windowsQuote(dst))
+	if err := os.WriteFile(helperPath, []byte(script), 0600); err != nil {
 		return err
 	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	return err
+	cmd := exec.Command("cmd.exe", "/C", "start", "", "/B", helperPath)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
+}
+
+func windowsQuote(path string) string {
+	return `"` + strings.ReplaceAll(path, `"`, `""`) + `"`
 }
 
 // isPermissionError checks if an error is a permission denied error.
 func isPermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
 	return errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) ||
-		strings.Contains(err.Error(), "permission denied")
+		strings.Contains(message, "permission denied") || strings.Contains(message, "access is denied") ||
+		strings.Contains(message, "access denied")
 }
 
 // permissionErrorMsg returns a friendly bilingual message telling the user
 // how to manually complete the update when the binary directory is not writable.
 // extractedPath is the path to the downloaded new binary.
 // exePath is the path to the currently running binary.
-func permissionErrorMsg(extractedPath, exePath string) string {
+func permissionErrorMsg(extractedPath, exePath string, canSudo bool) string {
 	method := detectInstallMethod()
 	var fixCmd string
 	switch method {
 	case installMethodBrew:
 		fixCmd = "EN: brew upgrade ttm\nCN: brew upgrade ttm\n  (brew will update automatically / brew 会自动完成更新)"
+	case installMethodScript, installMethodSource:
+		if canSudo {
+			fixCmd = fmt.Sprintf("EN: grant permission in this dialog, or run:\n  sudo mv %q %q\nCN: 可在当前窗口授权，或运行上面的命令", extractedPath, exePath)
+		} else if runtime.GOOS == "android" {
+			fixCmd = "EN: Termux has no sudo. Reinstall ttm into $PREFIX/bin.\nCN: Termux 不使用 sudo，请将 ttm 重新安装到 $PREFIX/bin。"
+		} else {
+			fixCmd = "EN: sudo is unavailable. Reinstall ttm into a user-writable bin directory.\nCN: 当前没有 sudo，请将 ttm 重新安装到用户可写的 bin 目录。"
+		}
 	default:
-		fixCmd = fmt.Sprintf("EN: sudo mv %s %s\nCN: sudo mv %s %s\n  (replace binary with sudo / 用 sudo 权限手动替换)", extractedPath, exePath, extractedPath, exePath)
+		fixCmd = "EN: reinstall ttm into a writable directory\nCN: 请将 ttm 重新安装到可写目录"
 	}
 	return fmt.Sprintf(
 		"⚠ permission denied: cannot replace %s\n"+
@@ -434,8 +512,8 @@ func execCommandExists(name string) bool {
 }
 
 // brewUpgrade runs "brew upgrade ttm" and returns (success, outputOrError).
-func brewUpgrade() (bool, string) {
-	cmd := exec.Command("brew", "upgrade", "ttm")
+func brewUpgrade(ctx context.Context) (bool, string) {
+	cmd := exec.CommandContext(ctx, "brew", "upgrade", "ttm")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return false, fmt.Sprintf("brew upgrade failed: %s", strings.TrimSpace(string(out)))
@@ -448,20 +526,30 @@ type progressReadCloser struct {
 	io.ReadCloser
 	total      int64
 	read       int64
-	onProgress func(float64)
+	onProgress func(updateProgressMsg)
 	lastReport float64
+	lastBytes  int64
 }
 
 func (p *progressReadCloser) Read(b []byte) (int, error) {
 	n, err := p.ReadCloser.Read(b)
 	p.read += int64(n)
-	if p.onProgress != nil && p.total > 0 {
-		progress := float64(p.read) / float64(p.total)
-		// Report at 1% increments to avoid flooding
-		if progress-p.lastReport >= 0.01 || progress >= 1.0 {
-			p.lastReport = progress
-			p.onProgress(progress)
+	if p.onProgress == nil {
+		return n, err
+	}
+	progress := float64(0)
+	shouldReport := p.lastBytes == 0 || p.read-p.lastBytes >= 256*1024 || err == io.EOF
+	if p.total > 0 {
+		progress = float64(p.read) / float64(p.total)
+		if progress > 1 {
+			progress = 1
 		}
+		shouldReport = shouldReport || progress-p.lastReport >= 0.01 || progress >= 1.0
+	}
+	if shouldReport && (n > 0 || p.read != p.lastBytes) {
+		p.lastReport = progress
+		p.lastBytes = p.read
+		p.onProgress(updateProgressMsg{Progress: progress, Downloaded: p.read, Total: p.total})
 	}
 	return n, err
 }

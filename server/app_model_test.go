@@ -3280,3 +3280,84 @@ func TestBookmarkEditorTmuxScrollLabelI18nAndEditBackfill(t *testing.T) {
 		t.Fatalf("expected tmuxScroll backfilled from bookmark, got %q", got)
 	}
 }
+
+func TestUpdateProgressMessageUpdatesStateAndWaitsForNextEvent(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	events := make(chan tea.Msg, 1)
+	AM.pendingUpdate = &updatePromptState{
+		id:           7,
+		dlStatus:     dlModelDownloading,
+		updateEvents: events,
+	}
+
+	_, cmd := am.Update(updateProgressMsg{ID: 7, Progress: 0.42, Downloaded: 42, Total: 100})
+	if AM.pendingUpdate.dlProgress != 0.42 || AM.pendingUpdate.dlDownloaded != 42 || AM.pendingUpdate.dlTotal != 100 {
+		t.Fatalf("progress state was not updated: %+v", AM.pendingUpdate)
+	}
+	if cmd == nil {
+		t.Fatal("expected command waiting for the next update event")
+	}
+	events <- updateDownloadResultMsg{ID: 7, Success: true}
+	msg := cmd()
+	result, ok := msg.(updateDownloadResultMsg)
+	if !ok || !result.Success {
+		t.Fatalf("unexpected next event: %#v", msg)
+	}
+}
+
+func TestUpdateProgressMessageIgnoresStaleTask(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	AM.pendingUpdate = &updatePromptState{id: 8, dlStatus: dlModelDownloading, dlProgress: 0.1}
+
+	_, cmd := am.Update(updateProgressMsg{ID: 7, Progress: 0.9, Downloaded: 90, Total: 100})
+	if cmd != nil {
+		t.Fatal("stale progress must not schedule another wait")
+	}
+	if AM.pendingUpdate.dlProgress != 0.1 {
+		t.Fatalf("stale progress changed current task: %v", AM.pendingUpdate.dlProgress)
+	}
+}
+
+func TestUpdatePermissionResultPreservesPathsWithSpaces(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	AM.pendingUpdate = &updatePromptState{id: 11, dlStatus: dlModelDownloading}
+	src := filepath.Join(t.TempDir(), "new ttm")
+	dst := filepath.Join(t.TempDir(), "bin dir", "ttm")
+
+	_, _ = am.Update(updateDownloadResultMsg{
+		ID:            11,
+		NeedSudo:      true,
+		Output:        "permission denied",
+		ExtractedPath: src,
+		ExePath:       dst,
+	})
+	if AM.pendingUpdate.dlStatus != dlModelNeedSudo {
+		t.Fatalf("status = %v, want sudo prompt", AM.pendingUpdate.dlStatus)
+	}
+	if AM.pendingUpdate.extractedPath != src || AM.pendingUpdate.exePath != dst {
+		t.Fatalf("paths were not preserved: %q %q", AM.pendingUpdate.extractedPath, AM.pendingUpdate.exePath)
+	}
+}
+
+func TestCancellingUpdateInvokesCancelFunction(t *testing.T) {
+	AM = AppModel{}
+	am := &AM
+	cancelled := false
+	AM.pendingUpdate = &updatePromptState{
+		dlStatus: dlModelDownloading,
+		cancelUpdate: func() {
+			cancelled = true
+		},
+	}
+
+	_ = am.handleUpdatePromptKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if !cancelled {
+		t.Fatal("expected active update context to be cancelled")
+	}
+	if AM.pendingUpdate.dlStatus != dlModelCancelled {
+		t.Fatalf("status = %v, want cancelled", AM.pendingUpdate.dlStatus)
+	}
+}
