@@ -3,6 +3,10 @@ package server
 import (
 	"bytes"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -58,14 +62,66 @@ func TestShPathArgPreservesHomeAndSpecialCharacters(t *testing.T) {
 	}
 }
 
-func TestRemoteSCPCommandDoesNotExposePathToLoginShell(t *testing.T) {
-	path := "/tmp/中文 空格/`touch pwned`/$(id)/it's"
-	got := remoteSCPCommand(true, false, path)
-	if strings.Contains(got, path) || strings.Contains(got, "touch pwned") {
-		t.Fatalf("remote SCP command exposed path to login shell: %q", got)
+// remoteSCPCommand must keep the session's stdin, because the SCP protocol is
+// spoken over it. Running it through a real /bin/sh with a stub scp on PATH
+// verifies both halves at once: the exact argv scp receives (quoting) and that
+// stdin still reaches it (no `printf ... | sh` wrapper).
+func runRemoteSCPCommandThroughShell(t *testing.T, command, stdin string, extraEnv ...string) []string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell semantics are not exercised on Windows")
 	}
-	if !strings.HasSuffix(got, " | sh") {
-		t.Fatalf("remote SCP command is not wrapped through sh: %q", got)
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no POSIX shell available")
+	}
+
+	dir := t.TempDir()
+	stub := "#!/bin/sh\nfor a in \"$@\"; do printf 'argv:%s\\n' \"$a\"; done\nprintf 'stdin:'\ncat\n"
+	if err := os.WriteFile(filepath.Join(dir, "scp"), []byte(stub), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(sh, "-c", command)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.Env = append(cmd.Env, extraEnv...)
+	cmd.Stdin = strings.NewReader(stdin)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run %q: %v", command, err)
+	}
+
+	if entries, readErr := os.ReadDir(dir); readErr == nil {
+		for _, e := range entries {
+			if e.Name() != "scp" {
+				t.Fatalf("command had a side effect: created %q", e.Name())
+			}
+		}
+	}
+	return strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+}
+
+func TestRemoteSCPCommandPreservesStdinAndQuotesPath(t *testing.T) {
+	remotePath := "/tmp/中文 空格/`touch pwned`/$(touch pwned2)/it's"
+	command := remoteSCPCommand(false, false, remotePath)
+	if strings.Contains(command, "| sh") || strings.Contains(command, "printf") {
+		t.Fatalf("SCP command must not redirect stdin through a shell pipe: %q", command)
+	}
+
+	got := runRemoteSCPCommandThroughShell(t, command, "protocol-bytes")
+	want := []string{"argv:-f", "argv:--", "argv:" + remotePath, "stdin:protocol-bytes"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("scp invocation = %#v, want %#v", got, want)
+	}
+}
+
+func TestRemoteSCPCommandRecursiveSinkAndTilde(t *testing.T) {
+	command := remoteSCPCommand(true, true, "~/上传 目标")
+	got := runRemoteSCPCommandThroughShell(t, command, "", "HOME=/home/tester")
+	want := []string{"argv:-r", "argv:-t", "argv:--", "argv:/home/tester/上传 目标", "stdin:"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("scp invocation = %#v, want %#v", got, want)
 	}
 }
 

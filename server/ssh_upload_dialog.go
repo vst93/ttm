@@ -66,12 +66,67 @@ func showActionMenu(tty io.Writer, stdinReader io.Reader, loc locale) (uploadAct
 	}
 }
 
+// completionHint renders an ambiguous Tab result as a compact candidate list
+// that fits on one line. Without it, completing only to the common prefix looks
+// like Tab did nothing at all.
+func completionHint(matches []string) string {
+	const maxWidth = 46
+	hint := "  " + strconv.Itoa(len(matches)) + ": "
+	width := displayWidth(hint)
+	for i, m := range matches {
+		w := displayWidth(m)
+		if i > 0 {
+			w++ // separating space
+		}
+		if width+w > maxWidth {
+			hint += " …"
+			break
+		}
+		if i > 0 {
+			hint += " "
+		}
+		hint += m
+		width += w
+	}
+	return hint
+}
+
+func displayWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		w += runeWidth(r)
+	}
+	return w
+}
+
+// showCompletionHint writes the candidate list after the cursor and returns the
+// cursor to where it was, so the hint decorates the line without becoming part
+// of the input. eraseCompletionHint removes it again.
+func showCompletionHint(tty io.Writer, matches []string) bool {
+	if len(matches) < 2 {
+		return false
+	}
+	// DECSC/DECRC (save/restore cursor) keeps the position correct even if the
+	// hint is written at the very end of the line.
+	fmt.Fprintf(tty, "\x1b7\x1b[2m%s\x1b[0m\x1b8", completionHint(matches))
+	return true
+}
+
+func eraseCompletionHint(tty io.Writer, shown *bool) {
+	if !*shown {
+		return
+	}
+	fmt.Fprint(tty, "\x1b[K") // cursor sits at the end of the input
+	*shown = false
+}
+
 // readInputLine reads a line of input with an optional pre-filled default value.
 // Supports full UTF-8 input including Chinese characters.
 // When tabComplete is non-nil, Tab triggers path completion.
 func readInputLine(tty io.Writer, stdinReader io.Reader, defaultVal string, tabComplete func(string) (string, []string)) string {
 	input := []rune(defaultVal)
 	modified := false
+	hintShown := false
 	if len(input) > 0 {
 		fmt.Fprintf(tty, "%s", string(input))
 	}
@@ -125,29 +180,34 @@ func readInputLine(tty io.Writer, stdinReader io.Reader, defaultVal string, tabC
 		switch r {
 		case '\t': // Tab completion (if tabComplete is provided)
 			if tabComplete != nil {
-				if !modified && len(input) > 0 {
-					clearInputLine(tty, input)
-					input = input[:0]
-					modified = true
-				}
+				// A pre-filled default is completed from, never discarded:
+				// Tab means "continue this path", so only mark the buffer as
+				// user-owned (so later typing appends instead of replacing).
+				modified = true
+				eraseCompletionHint(tty, &hintShown)
 				curInput := string(input)
-				completed, _ := tabComplete(curInput)
+				completed, matches := tabComplete(curInput)
 				if completed != curInput && completed != "" {
 					clearInputLine(tty, input)
 					input = []rune(completed)
 					fmt.Fprintf(tty, "%s", completed)
+				} else {
+					hintShown = showCompletionHint(tty, matches)
 				}
 			}
 
 		case '\r', '\n': // Enter
+			eraseCompletionHint(tty, &hintShown)
 			fmt.Fprintf(tty, "\r\n")
 			return strings.TrimSpace(string(input))
 
 		case 0x1B, 0x03: // Escape or Ctrl+C
+			eraseCompletionHint(tty, &hintShown)
 			fmt.Fprintf(tty, "\r\n")
 			return ""
 
 		case 0x08, 0x7F: // Backspace
+			eraseCompletionHint(tty, &hintShown)
 			if len(input) > 0 {
 				last := input[len(input)-1]
 				input = input[:len(input)-1]
@@ -158,6 +218,7 @@ func readInputLine(tty io.Writer, stdinReader io.Reader, defaultVal string, tabC
 			modified = true
 
 		case 0x15: // Ctrl+U — clear line
+			eraseCompletionHint(tty, &hintShown)
 			for len(input) > 0 {
 				last := input[len(input)-1]
 				input = input[:len(input)-1]
@@ -167,6 +228,7 @@ func readInputLine(tty io.Writer, stdinReader io.Reader, defaultVal string, tabC
 			modified = true
 
 		default:
+			eraseCompletionHint(tty, &hintShown)
 			if !modified && len(input) > 0 {
 				// First printable char: clear pre-filled default, start fresh.
 				clearInputLine(tty, input)
@@ -202,6 +264,7 @@ func runeWidth(r rune) int {
 func readRemotePath(tty io.Writer, stdinReader io.Reader, client *ssh.Client, defaultVal string) string {
 	input := []rune(defaultVal)
 	modified := false
+	hintShown := false
 
 	// Cache for Tab completion results.
 	var (
@@ -259,30 +322,28 @@ func readRemotePath(tty io.Writer, stdinReader io.Reader, client *ssh.Client, de
 
 		switch r {
 		case '\t': // Tab — remote path completion
-			if !modified && len(input) > 0 {
-				// First Tab: clear pre-filled default, start fresh.
-				clearInputLine(tty, input)
-				input = input[:0]
-				modified = true
-			}
+			// The pre-filled default (remote cwd) is the base for completion,
+			// not something to throw away; only take ownership of the buffer.
+			modified = true
+			eraseCompletionHint(tty, &hintShown)
 			curInput := string(input)
 			var completed string
+			var matches []string
 
-			// Use cache if input hasn't changed.
+			// Use cache if input hasn't changed (avoids a second SSH round-trip
+			// when Tab is pressed again on an ambiguous prefix).
 			if curInput == cacheInput && cacheComplete != "" {
-				completed = cacheComplete
+				completed, matches = cacheComplete, cacheMatches
 			} else {
-				var matches []string
 				completed, matches = remoteTabComplete(client, curInput)
-				// Cache the result.
 				cacheInput = curInput
 				cacheComplete = completed
 				cacheMatches = matches
-				_ = cacheMatches
 			}
 
 			if completed == curInput {
-				// No advancement — do nothing.
+				// No advancement — show the candidates instead.
+				hintShown = showCompletionHint(tty, matches)
 				continue
 			}
 			// Replace input with completed path.
@@ -291,14 +352,17 @@ func readRemotePath(tty io.Writer, stdinReader io.Reader, client *ssh.Client, de
 			fmt.Fprintf(tty, "%s", completed)
 
 		case '\r', '\n': // Enter
+			eraseCompletionHint(tty, &hintShown)
 			fmt.Fprintf(tty, "\r\n")
 			return strings.TrimSpace(string(input))
 
 		case 0x1B, 0x03: // Escape or Ctrl+C
+			eraseCompletionHint(tty, &hintShown)
 			fmt.Fprintf(tty, "\r\n")
 			return ""
 
 		case 0x08, 0x7F: // Backspace
+			eraseCompletionHint(tty, &hintShown)
 			if len(input) > 0 {
 				last := input[len(input)-1]
 				input = input[:len(input)-1]
@@ -310,12 +374,14 @@ func readRemotePath(tty io.Writer, stdinReader io.Reader, client *ssh.Client, de
 			modified = true
 
 		case 0x15: // Ctrl+U
+			eraseCompletionHint(tty, &hintShown)
 			clearInputLine(tty, input)
 			input = nil
 			cacheInput = ""
 			modified = true
 
 		default:
+			eraseCompletionHint(tty, &hintShown)
 			if !modified && len(input) > 0 {
 				// First printable char: clear pre-filled default, start fresh.
 				clearInputLine(tty, input)
@@ -375,6 +441,63 @@ func listLocalEntries(dir string) ([]localEntry, error) {
 	return result, nil
 }
 
+// completionCandidate is one Tab-completion match (local or remote).
+type completionCandidate struct {
+	name  string
+	isDir bool
+}
+
+// completePathFromEntries decides what Tab should insert for partial name
+// `prefix` among `entries`.
+//
+// A single match is completed in full. Several matches are completed only to
+// their longest common prefix — inserting the first match instead would
+// silently pick a different file than the user meant, which for a download or
+// an upload target is a wrong transfer, not a cosmetic issue. An empty returned
+// name means "nothing to insert" and the caller must leave the input alone.
+func completePathFromEntries(entries []completionCandidate, prefix string) (name string, isDir bool, matches []string) {
+	var first completionCandidate
+	common := ""
+	for _, e := range entries {
+		if e.name == "" || e.name == "." || e.name == ".." {
+			continue
+		}
+		if prefix != "" && !strings.HasPrefix(e.name, prefix) {
+			continue
+		}
+		if len(matches) == 0 {
+			first = e
+			common = e.name
+		} else {
+			common = commonRunePrefix(common, e.name)
+		}
+		matches = append(matches, e.name)
+	}
+	switch len(matches) {
+	case 0:
+		return "", false, nil
+	case 1:
+		return first.name, first.isDir, matches
+	default:
+		// The shared prefix may only be a directory when it is also a full
+		// match, which the single-match branch already covers.
+		return common, false, matches
+	}
+}
+
+// commonRunePrefix returns the longest common prefix of a and b, cut on a rune
+// boundary so multi-byte names (Chinese filenames) are never split mid-rune.
+func commonRunePrefix(a, b string) string {
+	i := 0
+	for _, r := range a {
+		if i+utf8.RuneLen(r) > len(b) || b[i:i+utf8.RuneLen(r)] != string(r) {
+			break
+		}
+		i += utf8.RuneLen(r)
+	}
+	return a[:i]
+}
+
 // localTabComplete performs Tab completion for local paths.
 // Returns the completed path and a list of matches.
 func localTabComplete(input string) (string, []string) {
@@ -399,34 +522,20 @@ func localTabComplete(input string) (string, []string) {
 		return input, nil
 	}
 
-	var matches []string
-	var firstMatch localEntry
-	foundFirst := false
-	for _, entry := range entries {
-		if entry.name == "" || entry.name == "." || entry.name == ".." {
-			continue
-		}
-		if prefix != "" && !strings.HasPrefix(entry.name, prefix) {
-			continue
-		}
-		matches = append(matches, entry.name)
-		if !foundFirst {
-			firstMatch = entry
-			foundFirst = true
-		}
+	candidates := make([]completionCandidate, 0, len(entries))
+	for _, e := range entries {
+		candidates = append(candidates, completionCandidate{name: e.name, isDir: e.isDir})
+	}
+	name, isDir, matches := completePathFromEntries(candidates, prefix)
+	if name == "" {
+		return input, matches
 	}
 
-	if !foundFirst {
-		return input, nil
+	completed := name
+	if dir != "." {
+		completed = filepath.Join(dir, name)
 	}
-
-	var completed string
-	if dir == "." {
-		completed = firstMatch.name
-	} else {
-		completed = filepath.Join(dir, firstMatch.name)
-	}
-	if firstMatch.isDir {
+	if isDir {
 		completed += string(filepath.Separator)
 	}
 
@@ -502,34 +611,20 @@ func remoteTabComplete(client *ssh.Client, input string) (string, []string) {
 		return input, nil
 	}
 
-	var matches []string
-	var firstMatch remoteEntry
-	foundFirst := false
-	for _, entry := range entries {
-		if entry.name == "" || entry.name == "." || entry.name == ".." {
-			continue
-		}
-		if prefix != "" && !strings.HasPrefix(entry.name, prefix) {
-			continue
-		}
-		matches = append(matches, entry.name)
-		if !foundFirst {
-			firstMatch = entry
-			foundFirst = true
-		}
+	candidates := make([]completionCandidate, 0, len(entries))
+	for _, e := range entries {
+		candidates = append(candidates, completionCandidate{name: e.name, isDir: e.isDir})
+	}
+	name, isDir, matches := completePathFromEntries(candidates, prefix)
+	if name == "" {
+		return input, matches
 	}
 
-	if !foundFirst {
-		return input, nil
+	completed := name
+	if dir != "." {
+		completed = path.Join(dir, name)
 	}
-
-	var completed string
-	if dir == "." {
-		completed = firstMatch.name
-	} else {
-		completed = path.Join(dir, firstMatch.name)
-	}
-	if firstMatch.isDir {
+	if isDir {
 		completed += "/"
 	}
 
@@ -993,6 +1088,9 @@ func (p *ttyProgress) render() {
 }
 
 func (p *ttyProgress) renderLocked() {
+	if p.tty == nil {
+		return // headless transfer (tests, non-interactive callers)
+	}
 	shownWritten := p.written
 	pct := 0
 	if p.total > 0 {
@@ -1098,6 +1196,9 @@ func (p *dirProgress) render() {
 }
 
 func (p *dirProgress) renderLocked() {
+	if p.tty == nil {
+		return // headless transfer (tests, non-interactive callers)
+	}
 	barWidth := 20
 	var filled int
 	// Prefer byte-based fill when a total size is known (smooth during large

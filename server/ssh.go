@@ -61,6 +61,17 @@ func existingKnownHostsFiles(ttmPath string) []string {
 	return files
 }
 
+// hostKeyCallback returns the host key verification strategy: trust-on-first-use
+// against known_hosts by default, or no verification at all when the user sets
+// TTM_INSECURE_SSH=1 (escape hatch for hosts behind a tunnel whose key rotates,
+// where a hard failure would otherwise block every connection).
+func hostKeyCallback() ssh.HostKeyCallback {
+	if os.Getenv("TTM_INSECURE_SSH") == "1" {
+		return ssh.InsecureIgnoreHostKey()
+	}
+	return tofuHostKeyCallback()
+}
+
 func tofuHostKeyCallback() ssh.HostKeyCallback {
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		knownHostsMu.Lock()
@@ -82,7 +93,10 @@ func tofuHostKeyCallback() ssh.HostKeyCallback {
 			}
 			var keyErr *knownhosts.KeyError
 			if !errors.As(err, &keyErr) || len(keyErr.Want) > 0 {
-				return fmt.Errorf("verify host key for %s (SHA256 fingerprint %s): %w", hostname, ssh.FingerprintSHA256(key), err)
+				return fmt.Errorf("%s (SHA256 %s): %w", AM.t(
+					"host key mismatch for "+hostname+"; if the server was rebuilt, drop the stale entry (ssh-keygen -R) or set TTM_INSECURE_SSH=1 to skip verification",
+					hostname+" 的主机密钥与已记录的不一致；若服务器已重装，请删除旧记录（ssh-keygen -R）或设置 TTM_INSECURE_SSH=1 跳过校验",
+				), ssh.FingerprintSHA256(key), err)
 			}
 		}
 
@@ -105,6 +119,46 @@ func tofuHostKeyCallback() ssh.HostKeyCallback {
 	}
 }
 
+// handshakeRetryDelays are the waits before each handshake retry. An FRP tunnel
+// that dropped the banner recovers within a few hundred milliseconds, so a
+// short ladder catches it; a server that is deliberately refusing this source
+// (sshd PerSourcePenalties — enabled by default since OpenSSH 10 — MaxStartups,
+// or fail2ban) holds for 15s or more, which no retry can outrun. Hence three
+// attempts and then an error that explains the wait.
+var handshakeRetryDelays = []time.Duration{400 * time.Millisecond, 1200 * time.Millisecond}
+
+// isTransientHandshakeErr reports whether a failed handshake is worth retrying
+// on a fresh TCP connection: the peer went away mid-handshake instead of
+// rejecting us for a reason that a retry would change (auth, host key,
+// algorithm mismatch).
+func isTransientHandshakeErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "EOF") ||
+		strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "broken pipe")
+}
+
+// handshakeDropHint explains a handshake that keeps dying after the TCP
+// connection was accepted — the one failure mode users cannot act on from the
+// raw error text.
+func handshakeDropHint() string {
+	return AM.t(
+		"TCP connected but the server closed the connection during the SSH handshake on every attempt. "+
+			"The server is most likely refusing this address for now (sshd PerSourcePenalties/MaxStartups, fail2ban) "+
+			"or the tunnel is unstable — wait ~30s and try again",
+		"TCP 已连通，但每次尝试都在 SSH 握手阶段被服务器断开。"+
+			"通常是服务端正在临时拒绝本地址的连接（sshd PerSourcePenalties/MaxStartups、fail2ban 等），"+
+			"或隧道不稳定 —— 请等待约 30 秒后重试",
+	)
+}
+
 // dialWithTrace performs a TCP dial + SSH handshake with automatic retry on
 // EOF (handles transient FRP tunnel instability). Every call creates a fresh
 // TCP + SSH connection — no reuse.
@@ -115,8 +169,8 @@ func dialWithTrace(ctx context.Context, addr string, config *ssh.ClientConfig) (
 
 	// --- SSH Handshake with FRP EOF retry ---
 	// FRP tunnel can be momentarily unstable during establishment, causing
-	// the banner read to return EOF. A single retry with a fresh TCP
-	// connection resolves this.
+	// the banner read to return EOF. Retries with a fresh TCP connection
+	// resolve this.
 	var (
 		tc      net.Conn
 		sshConn ssh.Conn
@@ -125,7 +179,8 @@ func dialWithTrace(ctx context.Context, addr string, config *ssh.ClientConfig) (
 		err     error
 	)
 
-	for attempt := 0; attempt < 2; attempt++ {
+	attempts := len(handshakeRetryDelays) + 1
+	for attempt := 0; attempt < attempts; attempt++ {
 		// Create a per-attempt context so that if the first handshake
 		// consumed most of the parent deadline, the retry still gets a
 		// reasonable window.
@@ -133,9 +188,9 @@ func dialWithTrace(ctx context.Context, addr string, config *ssh.ClientConfig) (
 
 		// TCP dial — use a per-attempt deadline from the remaining time.
 		if attempt > 0 {
-			// Wait briefly for FRP tunnel to re-establish
+			// Wait for the tunnel / server to settle before retrying.
 			select {
-			case <-time.After(500 * time.Millisecond):
+			case <-time.After(handshakeRetryDelays[attempt-1]):
 			case <-attemptCtx.Done():
 				attemptCancel()
 				return nil, fmt.Errorf("retry cancelled: %w", attemptCtx.Err())
@@ -170,11 +225,16 @@ func dialWithTrace(ctx context.Context, addr string, config *ssh.ClientConfig) (
 		if err != nil {
 			tc.Close()
 
-			if attempt == 0 && strings.Contains(err.Error(), "EOF") {
-				// Transient FRP EOF — retry with fresh TCP connection
+			if !isTransientHandshakeErr(err) {
+				return nil, fmt.Errorf("SSH handshake %s: %w", addr, err)
+			}
+			if attempt < attempts-1 {
+				// Transient drop (FRP hiccup, server closing the
+				// connection) — retry with a fresh TCP connection.
+				debugf("dial: transient handshake failure on attempt %d/%d: %v", attempt+1, attempts, err)
 				continue
 			}
-			return nil, fmt.Errorf("SSH handshake %s: %w", addr, err)
+			return nil, fmt.Errorf("SSH handshake %s (%d attempts): %w — %s", addr, attempts, err, handshakeDropHint())
 		}
 
 		// Success — clear deadline so that subsequent operations
@@ -569,7 +629,7 @@ func genSSHConfig(node *SSHConfig) (*defaultClient, error) {
 	config := &ssh.ClientConfig{
 		User:            node.User,
 		Auth:            authMethods,
-		HostKeyCallback: tofuHostKeyCallback(),
+		HostKeyCallback: hostKeyCallback(),
 		Timeout:         time.Second * 10,
 	}
 

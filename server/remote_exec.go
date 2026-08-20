@@ -61,6 +61,11 @@ func shPathArg(s string) string {
 // the user's login shell. POSIX printf %b accepts \0NNN octal escapes, and the
 // resulting command contains only a fixed safe ASCII alphabet. This avoids
 // nested-quote injection while remaining compatible with fish, zsh, and sh.
+//
+// The script is fed to sh over a pipe, so the remote command's stdin is the
+// pipe — never the SSH channel. Use this only for probes that read nothing from
+// stdin; commands that speak a protocol over stdin (scp) must be built by
+// remoteSCPCommand instead.
 func wrapShScript(script string) string {
 	var encoded strings.Builder
 	encoded.Grow(len(script) * 5)
@@ -70,6 +75,19 @@ func wrapShScript(script string) string {
 	return "printf '%b' '" + encoded.String() + "' | sh"
 }
 
+// remoteSCPCommand builds the remote command that starts scp in source mode
+// (-f, we download) or sink mode (-t, we upload).
+//
+// This command must NOT go through wrapShScript. The SCP protocol runs over the
+// session's own stdin/stdout, and `printf ... | sh` replaces the shell's stdin
+// with the printf pipe: scp then inherits an already-drained pipe, reads EOF
+// instead of the first protocol byte, and every transfer fails immediately with
+// "EOF" and 0 bytes transferred.
+//
+// Shell-agnosticism is not at stake here: a plain `scp <flags> -- <path>` is a
+// single command with quoted arguments, which sh, bash, zsh and fish all parse
+// identically. The path stays inside quotes (shPathArg), so it can never be
+// interpreted as shell syntax.
 func remoteSCPCommand(recursive bool, sink bool, remotePath string) string {
 	flags := "-f"
 	if sink {
@@ -78,7 +96,7 @@ func remoteSCPCommand(recursive bool, sink bool, remotePath string) string {
 	if recursive {
 		flags = "-r " + flags
 	}
-	return wrapShScript("exec scp " + flags + " -- " + shPathArg(remotePath))
+	return "scp " + flags + " -- " + shPathArg(remotePath)
 }
 
 // remoteRunSh runs a POSIX sh script on the remote host with a timeout.

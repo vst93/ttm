@@ -172,19 +172,19 @@ func TestParseKittyKey(t *testing.T) {
 		wantB byte
 		want  bool
 	}{
-		{"27u", 0x1b, true},    // Esc
-		{"27;1u", 0x1b, true},  // Esc (explicit mod 1)
-		{"3;5u", 0x03, true},   // Ctrl+C (codepoint 3, control mod)
-		{"3u", 0x03, true},     // Ctrl+C (no modifier)
-		{"9u", 0x09, true},     // Tab (codepoint 9)
-		{"9;5u", 0x09, true},   // Ctrl+I = Tab (codepoint 9, control mod)
-		{"13u", 0x0d, true},    // Enter (codepoint 13)
-		{"127u", 0x7f, true},   // Backspace (codepoint 127)
-		{"103;5u", 0, false},   // Ctrl+G - not a dialog key
-		{"97u", 0, false},      // 'a' - not a dialog key
-		{"5A", 0, false},       // CSI cuu (arrow up) - not kitty-u
-		{"", 0, false},         // empty
-		{"27", 0, false},       // no 'u' suffix
+		{"27u", 0x1b, true},   // Esc
+		{"27;1u", 0x1b, true}, // Esc (explicit mod 1)
+		{"3;5u", 0x03, true},  // Ctrl+C (codepoint 3, control mod)
+		{"3u", 0x03, true},    // Ctrl+C (no modifier)
+		{"9u", 0x09, true},    // Tab (codepoint 9)
+		{"9;5u", 0x09, true},  // Ctrl+I = Tab (codepoint 9, control mod)
+		{"13u", 0x0d, true},   // Enter (codepoint 13)
+		{"127u", 0x7f, true},  // Backspace (codepoint 127)
+		{"103;5u", 0, false},  // Ctrl+G - not a dialog key
+		{"97u", 0, false},     // 'a' - not a dialog key
+		{"5A", 0, false},      // CSI cuu (arrow up) - not kitty-u
+		{"", 0, false},        // empty
+		{"27", 0, false},      // no 'u' suffix
 	}
 	for _, c := range cases {
 		gotB, got := parseKittyKey(c.seq)

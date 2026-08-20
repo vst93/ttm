@@ -131,6 +131,100 @@ func TestRecvDirRecursiveRejectsNestedEOFWithoutEndMarker(t *testing.T) {
 	}
 }
 
+func TestReadInputLineTabCompletesFromPrefilledDefault(t *testing.T) {
+	stdin := &bytesReader{b: []byte("\t\r")}
+	var tty bytes.Buffer
+	seen := ""
+	got := readInputLine(&tty, stdin, "/Users/v/Downloads", func(in string) (string, []string) {
+		seen = in
+		return in + "/sub", nil
+	})
+	if seen != "/Users/v/Downloads" {
+		t.Fatalf("Tab completed from %q, want the pre-filled default", seen)
+	}
+	if got != "/Users/v/Downloads/sub" {
+		t.Fatalf("readInputLine = %q, want the completed default", got)
+	}
+}
+
+func TestReadInputLineTypingAfterTabAppends(t *testing.T) {
+	stdin := &bytesReader{b: []byte("\tx\r")}
+	var tty bytes.Buffer
+	got := readInputLine(&tty, stdin, "/tmp/base", func(in string) (string, []string) {
+		return in + "/", nil
+	})
+	if got != "/tmp/base/x" {
+		t.Fatalf("readInputLine = %q, want typing after Tab to append", got)
+	}
+}
+
+func TestReadRemotePathTabKeepsDefaultWhenCompletionUnavailable(t *testing.T) {
+	stdin := &bytesReader{b: []byte("\t\r")}
+	var tty bytes.Buffer
+	// nil client -> remoteTabComplete cannot advance; the pre-filled remote
+	// path must survive instead of being wiped (transfer would then fail).
+	if got := readRemotePath(&tty, stdin, nil, "/root/temp/报表.xlsx"); got != "/root/temp/报表.xlsx" {
+		t.Fatalf("readRemotePath = %q, want the pre-filled default preserved", got)
+	}
+}
+
+func TestCompletePathFromEntries(t *testing.T) {
+	entries := []completionCandidate{
+		{name: "报表-0727.xlsx"},
+		{name: "报表-0728.xlsx"},
+		{name: "logs", isDir: true},
+		{name: "."},
+	}
+	tests := []struct {
+		prefix    string
+		wantName  string
+		wantIsDir bool
+		wantCount int
+	}{
+		{prefix: "log", wantName: "logs", wantIsDir: true, wantCount: 1},
+		{prefix: "报表", wantName: "报表-072", wantCount: 2},
+		{prefix: "报表-0727", wantName: "报表-0727.xlsx", wantCount: 1},
+		{prefix: "nope", wantName: "", wantCount: 0},
+		{prefix: "", wantName: "", wantCount: 3},
+	}
+	for _, tt := range tests {
+		name, isDir, matches := completePathFromEntries(entries, tt.prefix)
+		if name != tt.wantName || isDir != tt.wantIsDir || len(matches) != tt.wantCount {
+			t.Errorf("completePathFromEntries(prefix=%q) = (%q, %v, %d matches), want (%q, %v, %d)",
+				tt.prefix, name, isDir, len(matches), tt.wantName, tt.wantIsDir, tt.wantCount)
+		}
+	}
+}
+
+func TestLocalTabCompleteStopsAtCommonPrefix(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"报表-0727.xlsx", "报表-0728.xlsx"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, matches := localTabComplete(filepath.Join(dir, "报表"))
+	if want := filepath.Join(dir, "报表-072"); got != want {
+		t.Fatalf("localTabComplete = %q, want the common prefix %q", got, want)
+	}
+	if len(matches) != 2 {
+		t.Fatalf("matches = %v, want both candidates", matches)
+	}
+}
+
+func TestLocalTabCompleteKeepsTrailingSlashWhenAmbiguous(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"alpha", "beta"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	input := dir + string(filepath.Separator)
+	if got, _ := localTabComplete(input); got != input {
+		t.Fatalf("localTabComplete(%q) = %q, want the input unchanged", input, got)
+	}
+}
+
 func TestSendDirRecursiveWaitsForEndAck(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "中文 文件.txt"), []byte("data"), 0600); err != nil {
@@ -150,5 +244,38 @@ func TestSendDirRecursiveWaitsForEndAck(t *testing.T) {
 	}
 	if !strings.Contains(protocol.String(), "C0600 4 中文 文件.txt\n") {
 		t.Fatalf("UTF-8 SCP filename was not preserved: %q", protocol.String())
+	}
+}
+
+func TestCompletionHintListsAmbiguousCandidates(t *testing.T) {
+	hint := completionHint([]string{"报表-0727.xlsx", "报表-0728.xlsx"})
+	if !strings.HasPrefix(hint, "  2: ") || !strings.Contains(hint, "报表-0727.xlsx") {
+		t.Fatalf("completionHint = %q, want a count and the candidates", hint)
+	}
+	if w := displayWidth(hint); w > 48 {
+		t.Fatalf("completionHint width = %d, want it to stay on one line", w)
+	}
+
+	many := make([]string, 40)
+	for i := range many {
+		many[i] = "candidate-with-a-long-name"
+	}
+	if hint := completionHint(many); !strings.HasSuffix(hint, "…") || displayWidth(hint) > 48 {
+		t.Fatalf("completionHint(40 matches) = %q, want a truncated one-line hint", hint)
+	}
+}
+
+func TestReadInputLineShowsCandidatesWhenTabCannotAdvance(t *testing.T) {
+	stdin := &bytesReader{b: []byte("\t\r")}
+	var tty bytes.Buffer
+	readInputLine(&tty, stdin, "/tmp/", func(in string) (string, []string) {
+		return in, []string{"alpha", "beta"}
+	})
+	out := tty.String()
+	if !strings.Contains(out, "2: alpha beta") {
+		t.Fatalf("tty output %q, want the candidate hint", out)
+	}
+	if !strings.Contains(out, "\x1b7") || !strings.Contains(out, "\x1b8") || !strings.Contains(out, "\x1b[K") {
+		t.Fatalf("tty output %q, want the hint saved, restored and erased", out)
 	}
 }

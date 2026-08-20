@@ -216,3 +216,42 @@ func TestLegacyCiphersAreOptIn(t *testing.T) {
 		t.Fatal("legacy cipher opt-in did not take effect")
 	}
 }
+
+func TestIsTransientHandshakeErr(t *testing.T) {
+	tests := []struct {
+		err  error
+		want bool
+	}{
+		{nil, false},
+		{io.EOF, true},
+		{io.ErrUnexpectedEOF, true},
+		{errors.New("ssh: handshake failed: EOF"), true},
+		{errors.New("read tcp 10.0.0.1:1234->10.0.0.2:22: connection reset by peer"), true},
+		{errors.New("ssh: handshake failed: ssh: unable to authenticate, attempted methods [none password]"), false},
+		{errors.New("ssh: handshake failed: knownhosts: key mismatch"), false},
+		{errors.New("ssh: handshake failed: ssh: no common algorithm for key exchange"), false},
+		{errors.New("dial tcp 10.0.0.2:22: i/o timeout"), false},
+	}
+	for _, tt := range tests {
+		if got := isTransientHandshakeErr(tt.err); got != tt.want {
+			t.Errorf("isTransientHandshakeErr(%v) = %v, want %v", tt.err, got, tt.want)
+		}
+	}
+}
+
+func TestHostKeyCallbackInsecureOptIn(t *testing.T) {
+	t.Setenv("TTM_INSECURE_SSH", "1")
+	insecure := hostKeyCallback()
+	if err := insecure("host:22", &net.TCPAddr{}, testHostKey(t)); err != nil {
+		t.Fatalf("TTM_INSECURE_SSH=1 must skip verification, got %v", err)
+	}
+}
+
+func testHostKey(t *testing.T) ssh.PublicKey {
+	t.Helper()
+	signer, err := ssh.ParsePrivateKey([]byte(generatePrivateKeyPEM(t)))
+	if err != nil {
+		t.Fatalf("parse generated key: %v", err)
+	}
+	return signer.PublicKey()
+}
