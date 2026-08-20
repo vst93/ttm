@@ -20,21 +20,21 @@ func TestBuildScpCommand(t *testing.T) {
 			info:      sshConnInfo{User: "root", Host: "host", Port: 22},
 			remoteDir: "/tmp",
 			localPath: "/local/file.txt",
-			wantCmd:   "scp -P 22 /local/file.txt root@host:/tmp/",
+			wantCmd:   "scp -P 22 '/local/file.txt' 'root@host:/tmp/'",
 		},
 		{
 			name:      "custom port",
 			info:      sshConnInfo{User: "u", Host: "h", Port: 2222},
 			remoteDir: "/home/u",
 			localPath: "./file.tar.gz",
-			wantCmd:   "scp -P 2222 ./file.tar.gz u@h:/home/u/",
+			wantCmd:   "scp -P 2222 './file.tar.gz' 'u@h:/home/u/'",
 		},
 		{
 			name:      "defaults",
 			info:      sshConnInfo{User: "", Host: "h", Port: 0},
 			remoteDir: "~",
 			localPath: "file",
-			wantCmd:   "scp -P 22 file root@h:~/",
+			wantCmd:   "scp -P 22 'file' 'root@h:~/'",
 		},
 	}
 

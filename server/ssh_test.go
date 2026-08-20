@@ -7,11 +7,14 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/muesli/cancelreader"
+	"golang.org/x/crypto/ssh"
 )
 
 func generatePrivateKeyPEM(t *testing.T) string {
@@ -131,5 +134,85 @@ func TestSSHTerm(t *testing.T) {
 	os.Unsetenv("TERM")
 	if got := sshTerm(); got != "xterm-256color" {
 		t.Fatalf("expected empty TERM to fall back to xterm-256color, got %q", got)
+	}
+}
+
+func TestTOFUHostKeyCallbackRecordsAndRejectsChanges(t *testing.T) {
+	originalAppDir := APP_DIR
+	APP_DIR = t.TempDir()
+	defer func() { APP_DIR = originalAppDir }()
+
+	makeKey := func() ssh.PublicKey {
+		privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatal(err)
+		}
+		key, err := ssh.NewPublicKey(&privateKey.PublicKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return key
+	}
+
+	hostname := "tofu-test.invalid:2222"
+	remote := &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: 2222}
+	key := makeKey()
+	callback := tofuHostKeyCallback()
+	if err := callback(hostname, remote, key); err != nil {
+		t.Fatalf("first-use host key: %v", err)
+	}
+	if err := callback(hostname, remote, key); err != nil {
+		t.Fatalf("recorded host key: %v", err)
+	}
+	if err := callback(hostname, remote, makeKey()); err == nil {
+		t.Fatal("changed host key was accepted")
+	}
+
+	data, err := os.ReadFile(filepath.Join(APP_DIR, "known_hosts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "[tofu-test.invalid]:2222") {
+		t.Fatalf("known_hosts did not contain normalized host: %q", data)
+	}
+}
+
+func TestLegacyCiphersAreOptIn(t *testing.T) {
+	original, had := os.LookupEnv("TTM_LEGACY_SSH")
+	defer func() {
+		if had {
+			_ = os.Setenv("TTM_LEGACY_SSH", original)
+		} else {
+			_ = os.Unsetenv("TTM_LEGACY_SSH")
+		}
+	}()
+
+	containsLegacy := func(ciphers []string) bool {
+		for _, configured := range ciphers {
+			for _, legacy := range legacyCiphers {
+				if configured == legacy {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	_ = os.Unsetenv("TTM_LEGACY_SSH")
+	secure, err := genSSHConfig(&SSHConfig{Host: "host", User: "user", Port: 22})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsLegacy(secure.clientConfig.Ciphers) {
+		t.Fatalf("legacy cipher enabled by default: %v", secure.clientConfig.Ciphers)
+	}
+
+	_ = os.Setenv("TTM_LEGACY_SSH", "1")
+	legacy, err := genSSHConfig(&SSHConfig{Host: "host", User: "user", Port: 22})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsLegacy(legacy.clientConfig.Ciphers) {
+		t.Fatal("legacy cipher opt-in did not take effect")
 	}
 }

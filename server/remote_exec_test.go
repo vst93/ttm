@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"os"
 	"strings"
 	"testing"
@@ -11,17 +12,16 @@ func TestShQuote(t *testing.T) {
 	tests := []struct {
 		in, want string
 	}{
-		{"vim", `"vim"`},
-		{"", `""`},
-		{"a b", `"a b"`},
-		{"/tmp/.ttm_cwd_1_2", `"/tmp/.ttm_cwd_1_2"`},
-		// A double quote in the input must be escaped as \" so the shell
-		// reconstructs the literal value.
-		{`it"s`, `"it\"s"`},
-		// Backslash must be escaped.
-		{`a\b`, `"a\\b"`},
-		// Dollar sign must be escaped to prevent variable expansion.
-		{`$HOME`, `"\$HOME"`},
+		{"vim", `'vim'`},
+		{"", `''`},
+		{"a b", `'a b'`},
+		{"/tmp/.ttm_cwd_1_2", `'/tmp/.ttm_cwd_1_2'`},
+		{`it"s`, `'it"s'`},
+		{`a\b`, `'a\b'`},
+		{`$HOME`, `'$HOME'`},
+		{"it's", `'it'"'"'s'`},
+		{"中文/空 格/`命令`/$(id)", `'中文/空 格/` + "`命令`" + `/$(id)'`},
+		{"line1\nline2", "'line1\nline2'"},
 	}
 	for _, tt := range tests {
 		got := shQuote(tt.in)
@@ -33,16 +33,39 @@ func TestShQuote(t *testing.T) {
 
 func TestWrapShScript(t *testing.T) {
 	got := wrapShScript("echo hi")
-	if want := `sh -c "echo hi"`; got != want {
+	if want := `printf '%b' '\0145\0143\0150\0157\0040\0150\0151' | sh`; got != want {
 		t.Fatalf("wrapShScript = %q, want %q", got, want)
 	}
 
-	// Inner double quotes must be escaped so the login shell hands sh a
-	// verbatim script body (this is what makes it fish/zsh-agnostic).
-	got = wrapShScript(`echo "a"`)
-	want := `sh -c "echo \"a\""`
-	if got != want {
-		t.Errorf("wrapShScript = %q, want %q", got, want)
+	for _, dangerous := range []string{"$(touch /tmp/pwned)", "`id`", "中文'\"$\\\n"} {
+		got = wrapShScript(dangerous)
+		if strings.Contains(got, dangerous) {
+			t.Errorf("encoded wrapper exposed script %q: %q", dangerous, got)
+		}
+	}
+}
+
+func TestShPathArgPreservesHomeAndSpecialCharacters(t *testing.T) {
+	cases := map[string]string{
+		"~":                   `"$HOME"`,
+		"~/中文/空 格":            `"$HOME"/'中文/空 格'`,
+		"/tmp/`id`/$(whoami)": "'/tmp/`id`/$(whoami)'",
+	}
+	for input, want := range cases {
+		if got := shPathArg(input); got != want {
+			t.Errorf("shPathArg(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestRemoteSCPCommandDoesNotExposePathToLoginShell(t *testing.T) {
+	path := "/tmp/中文 空格/`touch pwned`/$(id)/it's"
+	got := remoteSCPCommand(true, false, path)
+	if strings.Contains(got, path) || strings.Contains(got, "touch pwned") {
+		t.Fatalf("remote SCP command exposed path to login shell: %q", got)
+	}
+	if !strings.HasSuffix(got, " | sh") {
+		t.Fatalf("remote SCP command is not wrapped through sh: %q", got)
 	}
 }
 
@@ -66,9 +89,8 @@ func TestBuildIdleCheckScript(t *testing.T) {
 }
 
 func TestIsRemoteIdleNilClient(t *testing.T) {
-	// No SSH server needed: nil client short-circuits to "idle".
-	if !isRemoteIdle(nil) {
-		t.Error("isRemoteIdle(nil) should return true (assume idle)")
+	if isRemoteIdle(nil) {
+		t.Error("isRemoteIdle(nil) should fail closed")
 	}
 }
 
@@ -199,4 +221,74 @@ func TestScanCtrlGEventsIgnoresOSCBEL(t *testing.T) {
 	if len(ev) != 1 || ev[0].start != 0 {
 		t.Errorf("standalone BEL before OSC: expected 1 event at 0, got %+v", ev)
 	}
+}
+
+func TestCtrlGStreamScannerIgnoresSplitOSC(t *testing.T) {
+	s := new(ctrlGStreamScanner)
+	if events := s.scan([]byte{0x1b, ']', '1', '1', ';', 'r', 'g', 'b'}); len(events) != 0 {
+		t.Fatalf("unexpected event in OSC prefix: %+v", events)
+	}
+	if events := s.scan([]byte{':', 'f', 'f', 0x07}); len(events) != 0 {
+		t.Fatalf("split OSC BEL was treated as Ctrl+G: %+v", events)
+	}
+	if events := s.scan([]byte{0x07}); len(events) != 1 {
+		t.Fatalf("standalone Ctrl+G after OSC not detected: %+v", events)
+	}
+}
+
+func TestCtrlGStreamScannerDoesNotCarryNonOSCInputAcrossReads(t *testing.T) {
+	s := new(ctrlGStreamScanner)
+	if events := s.scan([]byte{0x1b}); len(events) != 0 {
+		t.Fatalf("unexpected event for ESC prefix: %+v", events)
+	}
+	if events := s.scan([]byte{'x', 0x07}); len(events) != 1 || events[0].start != 1 {
+		t.Fatalf("non-OSC input was lost after split ESC: %+v", events)
+	}
+
+	s = new(ctrlGStreamScanner)
+	_ = s.scan([]byte{0x1b})
+	if events := s.scan([]byte{']', '1', '1', ';', 'x', 0x07}); len(events) != 0 {
+		t.Fatalf("split OSC BEL was treated as Ctrl+G: %+v", events)
+	}
+}
+
+func TestCtrlGStreamScannerIgnoresSplitOSCST(t *testing.T) {
+	s := new(ctrlGStreamScanner)
+	_ = s.scan([]byte{0x1b, ']', '0', ';', 'x', 0x1b})
+	if events := s.scan([]byte{'\\', 0x07}); len(events) != 1 || events[0].start != 1 {
+		t.Fatalf("OSC ST split handling failed: %+v", events)
+	}
+}
+
+func TestCompleteControlSequenceJoinsSplitKittyCtrlG(t *testing.T) {
+	r := &bytesReader{b: []byte{'3', ';', '5', 'u'}}
+	withReadable(alwaysReadable, func() {
+		got := completeControlSequence(r, []byte{0x1b, '[', '1', '0'})
+		if !bytes.Equal(got, kittyCtrlGSeq) {
+			t.Fatalf("got % x, want % x", got, kittyCtrlGSeq)
+		}
+	})
+}
+
+func TestCompleteControlSequenceJoinsSplitOSCIntroducer(t *testing.T) {
+	r := &bytesReader{b: []byte{']'}}
+	withReadable(alwaysReadable, func() {
+		got := completeControlSequence(r, []byte{0x1b})
+		if !bytes.Equal(got, []byte{0x1b, ']'}) {
+			t.Fatalf("got % x, want split OSC introducer", got)
+		}
+		if events := scanCtrlGEvents(append(got, '1', '1', ';', 'x', 0x07)); len(events) != 0 {
+			t.Fatalf("joined OSC BEL was treated as Ctrl+G: %+v", events)
+		}
+	})
+}
+
+func TestCompleteControlSequenceDoesNotHoldStandaloneEsc(t *testing.T) {
+	r := &bytesReader{}
+	withReadable(neverReadable, func() {
+		got := completeControlSequence(r, []byte{0x1b})
+		if !bytes.Equal(got, []byte{0x1b}) {
+			t.Fatalf("standalone Esc changed: % x", got)
+		}
+	})
 }

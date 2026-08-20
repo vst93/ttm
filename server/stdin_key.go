@@ -56,24 +56,35 @@ var stdinReadable = stdinReadableWithin
 // Returns (0, false) when an escape sequence was drained (caller continues)
 // or on read error/end (caller continues/aborts).
 func readSignificantByte(r io.Reader) (byte, bool) {
+	b, ok, _ := readSignificantByteErr(r)
+	return b, ok
+}
+
+// readSignificantByteErr is the production variant of readSignificantByte.
+// It distinguishes a drained terminal sequence (ok=false, err=nil) from an
+// input stream that has ended, so dialogs can exit when the SSH session closes.
+func readSignificantByteErr(r io.Reader) (byte, bool, error) {
 	var b [1]byte
 	n, err := r.Read(b[:])
-	if n != 1 || err != nil {
-		return 0, false
+	if n != 1 {
+		if err == nil {
+			err = io.ErrNoProgress
+		}
+		return 0, false, err
 	}
 	if b[0] != 0x1b {
-		return b[0], true
+		return b[0], true, nil
 	}
 
 	// ESC: peek for a following byte to decide standalone-Esc vs sequence.
 	next, ok := peekByte(r, escPeekTimeout, stdinReadable)
 	if !ok {
-		return 0x1b, true // standalone Esc (cancel)
+		return 0x1b, true, nil // standalone Esc (cancel)
 	}
 	switch next {
 	case ']': // OSC: ESC ] params ST  (ST = BEL or ESC \)
 		drainOSC(r, stdinReadable)
-		return 0, false
+		return 0, false, nil
 	case '[': // CSI: ESC [ params <final 0x40-0x7e>
 		// Read the full sequence so we can recognize kitty-keyboard-encoded
 		// cancel keys (Esc=ESC[27u, Ctrl+C=ESC[3;5u) in case the local kitty
@@ -81,16 +92,16 @@ func readSignificantByte(r io.Reader) (byte, bool) {
 		seq := readCSIReturning(r, stdinReadable)
 		if b, ok := parseKittyKey(seq); ok {
 			debugf("ctrl-key: synthesized kitty key 0x%02x from CSI%su", b, seq)
-			return b, true
+			return b, true, nil
 		}
-		return 0, false
+		return 0, false, nil
 	case 'O': // SS3: ESC O <one byte>
 		drainN(r, 1, stdinReadable)
-		return 0, false
+		return 0, false, nil
 	case 0x1b: // two ESCs in a row — treat the second as a new standalone Esc
-		return 0x1b, true
+		return 0x1b, true, nil
 	default: // Alt+key or other combo — drop the modifier byte
-		return 0, false
+		return 0, false, nil
 	}
 }
 

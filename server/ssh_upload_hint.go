@@ -40,20 +40,20 @@ func buildIdleCheckScript() string {
 }
 
 // isRemoteIdle checks if the remote SSH server has any fullscreen/TUI program
-// running. Returns true if the remote appears idle (no fullscreen program
-// detected, or the probe failed/timed out).
+// running. Probe failures are treated as busy so the shortcut never steals
+// Ctrl+G from an application when the remote state is unknown.
 //
 // The probe is bounded by a 1s timeout so a slow or hung remote shell (e.g.
 // a framework-heavy fish/oh-my-zsh invoked for the exec session) can never
-// block the Ctrl+G trigger — on timeout we assume idle and proceed.
+// block the Ctrl+G trigger — on timeout the shortcut remains disabled.
 func isRemoteIdle(client *ssh.Client) bool {
 	if client == nil {
-		return true
+		return false
 	}
 
 	out, err := remoteRunSh(client, buildIdleCheckScript(), 1*time.Second)
 	if err != nil {
-		return true // assume idle on error or timeout
+		return false // fail closed: do not steal a key from an unknown remote state
 	}
 	return out != "found"
 }
@@ -91,8 +91,9 @@ func buildUploadCmd(info sshConnInfo, remoteDir string) string {
 	if user == "" {
 		user = "root"
 	}
-	return fmt.Sprintf("scp -P %d <local_file> %s@%s:%s/",
-		port, user, info.Host, remoteDir)
+	remoteTarget := user + "@" + info.Host + ":" + strings.TrimRight(remoteDir, "/") + "/"
+	return fmt.Sprintf("scp -P %d %s %s",
+		port, shQuote("<local_file>"), shQuote(remoteTarget))
 }
 
 // localeT is a standalone locale helper (works without AppModel).
@@ -178,33 +179,54 @@ type ctrlGEvent struct{ start, end int }
 // CSI 103 ; 5 u  (codepoint 'g'=103, modifier control=5).
 var kittyCtrlGSeq = []byte{0x1b, 0x5b, '1', '0', '3', ';', '5', 'u'}
 
-// scanCtrlGEvents finds all Ctrl+G events in data, matching both the raw 0x07
-// byte and the kitty keyboard sequence ESC[103;5u. Events are returned sorted
-// by position. In-chunk matching only: the kitty sequence is delivered
-// atomically per keypress by terminals, so cross-read splitting is not handled
-// (a split press would simply be forwarded and the user re-presses — no other
-// keys are affected, keeping this safe for normal typing/arrows).
-func scanCtrlGEvents(data []byte) []ctrlGEvent {
+type ctrlGStreamScanner struct {
+	inOSC      bool
+	oscEsc     bool
+	pendingESC bool
+}
+
+// scan finds Ctrl+G while retaining OSC state between reads. BEL terminators
+// inside terminal OSC responses are data, not keyboard input.
+func (s *ctrlGStreamScanner) scan(data []byte) []ctrlGEvent {
 	var events []ctrlGEvent
 	i := 0
+	if s.pendingESC {
+		s.pendingESC = false
+		if len(data) > 0 && data[0] == ']' {
+			s.inOSC = true
+			i = 1
+		}
+	}
 	for i < len(data) {
+		if s.inOSC {
+			b := data[i]
+			i++
+			if b == ctrlGByte {
+				s.inOSC = false
+				s.oscEsc = false
+				continue
+			}
+			if s.oscEsc && b == '\\' {
+				s.inOSC = false
+				s.oscEsc = false
+				continue
+			}
+			s.oscEsc = b == 0x1b
+			continue
+		}
+
 		// Skip OSC sequences (ESC] ... BEL/ESC\) — their BEL terminators
 		// must not be matched as Ctrl+G. This is the primary source of
 		// false positives from terminal color-query responses.
 		if data[i] == 0x1b && i+1 < len(data) && data[i+1] == 0x5d {
-			// OSC: scan for terminator (BEL 0x07 or ESC\ 0x1b5c).
+			s.inOSC = true
+			s.oscEsc = false
 			i += 2
-			for i < len(data) {
-				if data[i] == 0x07 { // BEL terminator
-					i++
-					break
-				}
-				if data[i] == 0x1b && i+1 < len(data) && data[i+1] == 0x5c { // ESC\ terminator
-					i += 2
-					break
-				}
-				i++
-			}
+			continue
+		}
+		if data[i] == 0x1b && i+1 == len(data) {
+			s.pendingESC = true
+			i++
 			continue
 		}
 		if data[i] == ctrlGByte {
@@ -223,6 +245,39 @@ func scanCtrlGEvents(data []byte) []ctrlGEvent {
 		i++
 	}
 	return events
+}
+
+func scanCtrlGEvents(data []byte) []ctrlGEvent {
+	return new(ctrlGStreamScanner).scan(data)
+}
+
+// completeControlSequence reads immediately available continuation bytes for
+// a Kitty Ctrl+G sequence split at a read boundary. It waits at most one short
+// terminal-response interval per byte; a standalone Esc is then forwarded.
+func completeControlSequence(r io.Reader, data []byte) []byte {
+	for i := 0; i < len(kittyCtrlGSeq); i++ {
+		needsMore := false
+		maxSuffix := len(kittyCtrlGSeq) - 1
+		if len(data) < maxSuffix {
+			maxSuffix = len(data)
+		}
+		for n := 1; n <= maxSuffix; n++ {
+			suffix := data[len(data)-n:]
+			if bytes.HasPrefix(kittyCtrlGSeq, suffix) || (n == 1 && suffix[0] == 0x1b) {
+				needsMore = true
+				break
+			}
+		}
+		if !needsMore || !stdinReadable(drainByteTimeout) {
+			return data
+		}
+		var next [1]byte
+		if n, err := r.Read(next[:]); n != 1 || err != nil {
+			return data
+		}
+		data = append(data, next[0])
+	}
+	return data
 }
 
 // startStdinCopyWithIntercept is like startStdinCopy but intercepts Ctrl+G
@@ -247,8 +302,8 @@ func scanCtrlGEvents(data []byte) []ctrlGEvent {
 //   - Single Ctrl+G: forward to remote (vim shows file info), arm double-press window
 //   - Double Ctrl+G (within window): first press forwarded, second press triggers handler
 //     (NOT forwarded to remote, so vim doesn't see a second Ctrl+G)
-//   - Noise suppression: multiple Ctrl+G in one chunk or rapid bursts (< noiseThreshold)
-//     are forwarded as-is without triggering
+//   - Two adjacent Ctrl+G presses trigger even if the OS coalesces them into
+//     one read; ordinary input between presses disarms the shortcut.
 //
 // The handleTrigger callback receives the stdinReader so it can read user
 // input directly (e.g. for a dialog). It is called synchronously, blocking
@@ -263,11 +318,6 @@ func startStdinCopyWithIntercept(stdinPipe io.WriteCloser, client *ssh.Client, c
 	// count as a double-press (trigger upload dialog).
 	const doublePressWindow = 700 * time.Millisecond
 
-	// noiseThreshold is the minimum time between two Ctrl+G presses for
-	// them to be considered a genuine double-press. Presses closer than
-	// this are treated as terminal protocol noise and forwarded as-is.
-	const noiseThreshold = 30 * time.Millisecond
-
 	done := make(chan error, 1)
 	go func() {
 		// First trace line: proves the new binary is running, the goroutine
@@ -278,6 +328,7 @@ func startStdinCopyWithIntercept(stdinPipe io.WriteCloser, client *ssh.Client, c
 		buf := make([]byte, readBufSize)
 		var lastCtrlGTime time.Time // time of last Ctrl+G that was forwarded
 		inputTracker := newRemoteShellInputTracker(cwdCache)
+		ctrlGScanner := new(ctrlGStreamScanner)
 
 		forward := func(data []byte) error {
 			if len(data) == 0 {
@@ -288,29 +339,10 @@ func startStdinCopyWithIntercept(stdinPipe io.WriteCloser, client *ssh.Client, c
 			return err
 		}
 
-		// triggerEvent forwards all bytes of data except those of the Ctrl+G
-		// event e, then invokes the handler. The event bytes (raw 0x07 or the
-		// kitty sequence) are deliberately not forwarded so the remote shell
-		// does not see a second Ctrl+G.
-		triggerEvent := func(data []byte, e ctrlGEvent, idleChecked bool) error {
-			if err := forward(data[:e.start]); err != nil {
-				return err
-			}
-			if e.end < len(data) {
-				if err := forward(data[e.end:]); err != nil {
-					return err
-				}
-			}
-			if handleTrigger != nil {
-				handleTrigger(stdinReader, idleChecked)
-			}
-			return nil
-		}
-
 		for {
 			n, readErr := stdinReader.Read(buf)
 			if n > 0 {
-				data := buf[:n]
+				data := completeControlSequence(stdinReader, append([]byte(nil), buf[:n]...))
 				debugChunk(data)
 
 				// Detect Ctrl+G events. A press may arrive as either a raw 0x07
@@ -318,102 +350,61 @@ func startStdinCopyWithIntercept(stdinPipe io.WriteCloser, client *ssh.Client, c
 				// ESC[103;5u (kitty keyboard ON — enabled by some remote
 				// shells/prompts, e.g. fish + starship / oh-my-zsh). Without
 				// recognizing the kitty form, Ctrl+G never triggers on such hosts.
-				events := scanCtrlGEvents(data)
-				ctrlGCount := len(events)
+				events := ctrlGScanner.scan(data)
+				cursor := 0
+				triggered := false
+				idleChecked := false
+				forwardOrdinary := func(part []byte) error {
+					if len(part) > 0 {
+						lastCtrlGTime = time.Time{}
+					}
+					return forward(part)
+				}
 
-				switch {
-				case ctrlGCount == 2:
-					// Two Ctrl+G in one chunk — always noise (real double-presses
-					// arrive in separate reads). Forward as-is.
-					debugf("ctrl+g: 2-in-chunk (noise) -> forward")
-					if err := forward(data); err != nil {
+				for _, e := range events {
+					if err := forwardOrdinary(data[cursor:e.start]); err != nil {
 						done <- err
 						_ = stdinPipe.Close()
 						return
 					}
-					lastCtrlGTime = time.Time{}
-
-				case ctrlGCount > 2:
-					// More than two → terminal noise. Forward as-is.
-					debugf("ctrl+g: %d-in-chunk (noise) -> forward", ctrlGCount)
-					if err := forward(data); err != nil {
-						done <- err
-						_ = stdinPipe.Close()
-						return
-					}
-					lastCtrlGTime = time.Time{}
-
-				case ctrlGCount == 1:
 					now := time.Now()
-					e := events[0]
-
-					// Single-press mode (TTM_TRIGGER=single): trigger on the first
-					// Ctrl+G without waiting for a second press.
-					if triggerMode() == "single" {
+					if !triggered && triggerMode() == "single" {
 						debugf("ctrl+g: single-mode -> trigger")
-						if err := triggerEvent(data, e, false); err != nil {
-							done <- err
-							_ = stdinPipe.Close()
-							return
-						}
+						triggered = true
 						lastCtrlGTime = time.Time{}
-						break
-					}
-
-					if !lastCtrlGTime.IsZero() && now.Sub(lastCtrlGTime) < doublePressWindow {
-						// A previous Ctrl+G was recently forwarded.
-						if now.Sub(lastCtrlGTime) < noiseThreshold {
-							// Too fast — likely terminal noise. Forward as-is.
-							debugf("ctrl+g: 2nd too fast (%v) -> noise", now.Sub(lastCtrlGTime))
-							if err := forward(data); err != nil {
-								done <- err
-								_ = stdinPipe.Close()
-								return
-							}
-							lastCtrlGTime = time.Time{}
-							break
-						}
-
-						// Genuine double-press! Check remote idle before triggering.
-						if !isRemoteIdle(client) {
+					} else if !triggered && !lastCtrlGTime.IsZero() && now.Sub(lastCtrlGTime) < doublePressWindow {
+						if isRemoteIdle(client) {
+							debugf("ctrl+g: double-press (%v) -> trigger", now.Sub(lastCtrlGTime))
+							triggered = true
+							idleChecked = true
+						} else {
 							debugf("ctrl+g: double-press but remote busy -> forward")
-							if err := forward(data); err != nil {
+							if err := forward(data[e.start:e.end]); err != nil {
 								done <- err
 								_ = stdinPipe.Close()
 								return
 							}
-							lastCtrlGTime = time.Time{}
-							break
 						}
-						debugf("ctrl+g: double-press (%v) -> trigger", now.Sub(lastCtrlGTime))
-						if err := triggerEvent(data, e, true); err != nil {
+						lastCtrlGTime = time.Time{}
+					} else {
+						debugf("ctrl+g: first press, arming")
+						if err := forward(data[e.start:e.end]); err != nil {
 							done <- err
 							_ = stdinPipe.Close()
 							return
 						}
-						lastCtrlGTime = time.Time{}
-						break
+						lastCtrlGTime = now
 					}
-
-					// First Ctrl+G press — forward to remote, arm window.
-					// No idle check here to avoid blocking stdin (~180ms per
-					// check). The idle check is deferred to the second press.
-					debugf("ctrl+g: first press, arming")
-					if err := forward(data); err != nil {
-						done <- err
-						_ = stdinPipe.Close()
-						return
-					}
-					lastCtrlGTime = now
-
-				default:
-					// No Ctrl+G in this chunk — forward normally, reset state.
-					if err := forward(data); err != nil {
-						done <- err
-						_ = stdinPipe.Close()
-						return
-					}
+					cursor = e.end
+				}
+				if err := forwardOrdinary(data[cursor:]); err != nil {
+					done <- err
+					_ = stdinPipe.Close()
+					return
+				}
+				if triggered && handleTrigger != nil {
 					lastCtrlGTime = time.Time{}
+					handleTrigger(stdinReader, idleChecked)
 				}
 			}
 

@@ -8,34 +8,102 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/muesli/cancelreader"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 	"golang.org/x/crypto/ssh/terminal"
 )
 
-var (
-	DefaultCiphers = []string{
-		"aes128-ctr",
-		"aes192-ctr",
-		"aes256-ctr",
-		"aes128-gcm@openssh.com",
-		"chacha20-poly1305@openssh.com",
-		"arcfour256",
-		"arcfour128",
-		"arcfour",
-		"aes128-cbc",
-		"3des-cbc",
-		"blowfish-cbc",
-		"cast128-cbc",
-		"aes192-cbc",
-		"aes256-cbc",
+var legacyCiphers = []string{
+	"arcfour256", "arcfour128", "arcfour", "aes128-cbc", "3des-cbc",
+	"blowfish-cbc", "cast128-cbc", "aes192-cbc", "aes256-cbc",
+}
+
+// DefaultCiphers is retained for callers that used the exported setting. It
+// now reflects the crypto library's secure default set; legacy algorithms are
+// available only through TTM_LEGACY_SSH=1.
+var DefaultCiphers = append([]string(nil), ssh.SupportedAlgorithms().Ciphers...)
+
+var knownHostsMu sync.Mutex
+
+func ttmKnownHostsPath() (string, error) {
+	dir := APP_DIR
+	if dir == "" {
+		configDir, err := os.UserConfigDir()
+		if err != nil {
+			return "", err
+		}
+		dir = filepath.Join(configDir, "ttm")
 	}
-)
+	return filepath.Join(dir, "known_hosts"), nil
+}
+
+func existingKnownHostsFiles(ttmPath string) []string {
+	files := make([]string, 0, 3)
+	if home, err := os.UserHomeDir(); err == nil {
+		for _, name := range []string{"known_hosts", "known_hosts2"} {
+			p := filepath.Join(home, ".ssh", name)
+			if info, statErr := os.Stat(p); statErr == nil && !info.IsDir() {
+				files = append(files, p)
+			}
+		}
+	}
+	if info, err := os.Stat(ttmPath); err == nil && !info.IsDir() {
+		files = append(files, ttmPath)
+	}
+	return files
+}
+
+func tofuHostKeyCallback() ssh.HostKeyCallback {
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		knownHostsMu.Lock()
+		defer knownHostsMu.Unlock()
+
+		ttmPath, err := ttmKnownHostsPath()
+		if err != nil {
+			return fmt.Errorf("resolve known_hosts path: %w", err)
+		}
+		files := existingKnownHostsFiles(ttmPath)
+		if len(files) > 0 {
+			check, err := knownhosts.New(files...)
+			if err != nil {
+				return fmt.Errorf("load known_hosts: %w", err)
+			}
+			err = check(hostname, remote, key)
+			if err == nil {
+				return nil
+			}
+			var keyErr *knownhosts.KeyError
+			if !errors.As(err, &keyErr) || len(keyErr.Want) > 0 {
+				return fmt.Errorf("verify host key for %s (SHA256 fingerprint %s): %w", hostname, ssh.FingerprintSHA256(key), err)
+			}
+		}
+
+		if err := os.MkdirAll(filepath.Dir(ttmPath), 0700); err != nil {
+			return fmt.Errorf("create known_hosts directory: %w", err)
+		}
+		f, err := os.OpenFile(ttmPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			return fmt.Errorf("open known_hosts: %w", err)
+		}
+		line := knownhosts.Line([]string{hostname}, key) + "\n"
+		if _, err := io.WriteString(f, line); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("record host key: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("close known_hosts: %w", err)
+		}
+		return nil
+	}
+}
 
 // dialWithTrace performs a TCP dial + SSH handshake with automatic retry on
 // EOF (handles transient FRP tunnel instability). Every call creates a fresh
@@ -378,41 +446,62 @@ func (c *defaultClient) Login() error {
 		return fmt.Errorf("open local stdin reader: %w", err)
 	}
 	defer cancelStdinCopy()
+	backgroundCtx, stopBackground := context.WithCancel(context.Background())
+	defer stopBackground()
+	var background sync.WaitGroup
 
 	// interval get terminal size
 	// fix resize issue
+	background.Add(1)
 	go func() {
+		defer background.Done()
 		var (
 			ow = w
 			oh = h
 		)
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
 		for {
-			cw, ch, err := terminal.GetSize(fd)
-			if err != nil {
-				break
-			}
-
-			if cw != ow || ch != oh {
-				err = session.WindowChange(ch, cw)
+			select {
+			case <-backgroundCtx.Done():
+				return
+			case <-ticker.C:
+				cw, ch, err := terminal.GetSize(fd)
 				if err != nil {
-					break
+					return
 				}
-				ow = cw
-				oh = ch
+				if cw != ow || ch != oh {
+					if err := session.WindowChange(ch, cw); err != nil {
+						return
+					}
+					ow = cw
+					oh = ch
+				}
 			}
-			time.Sleep(time.Second)
 		}
 	}()
 
 	// send keepalive
+	background.Add(1)
 	go func() {
+		defer background.Done()
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
 		for {
-			time.Sleep(time.Second * 10)
-			client.SendRequest("keepalive@openssh.com", false, nil)
+			select {
+			case <-backgroundCtx.Done():
+				return
+			case <-ticker.C:
+				if _, _, err := client.SendRequest("keepalive@openssh.com", false, nil); err != nil {
+					return
+				}
+			}
 		}
 	}()
 
 	waitErr := session.Wait()
+	stopBackground()
+	background.Wait()
 	cancelStdinCopy()
 	copyErr := <-stdinCopyDone
 	if !isStdinCopyErrBenign(copyErr) {
@@ -480,12 +569,14 @@ func genSSHConfig(node *SSHConfig) (*defaultClient, error) {
 	config := &ssh.ClientConfig{
 		User:            node.User,
 		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: tofuHostKeyCallback(),
 		Timeout:         time.Second * 10,
 	}
 
 	config.SetDefaults()
-	config.Ciphers = append(config.Ciphers, DefaultCiphers...)
+	if os.Getenv("TTM_LEGACY_SSH") == "1" {
+		config.Ciphers = append(config.Ciphers, legacyCiphers...)
+	}
 
 	return &defaultClient{
 		clientConfig: config,

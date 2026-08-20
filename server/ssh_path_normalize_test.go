@@ -1,10 +1,19 @@
 package server
 
 import (
+	"path"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestRemotePathsUsePOSIXSeparators(t *testing.T) {
+	input := "/home/用户/文"
+	completed := path.Join(path.Dir(input), "文档") + "/"
+	if strings.Contains(completed, `\`) || completed != "/home/用户/文档/" {
+		t.Fatalf("unexpected remote completion path %q", completed)
+	}
+}
 
 func TestNormalizeRemotePathInput(t *testing.T) {
 	cases := []struct {
@@ -14,6 +23,8 @@ func TestNormalizeRemotePathInput(t *testing.T) {
 		{`/home/tar/dir/`, `/home/tar/dir`},
 		{`"/home/tar/my dir"`, `/home/tar/my dir`},
 		{`/home/tar/my\ dir/file.txt`, `/home/tar/my dir/file.txt`},
+		{`/`, `/`},
+		{`///`, `/`},
 	}
 	for _, tc := range cases {
 		if got := normalizeRemotePathInput(tc.in); got != tc.want {
@@ -51,6 +62,12 @@ func TestNormalizeLocalPathInputWindowsStylePath(t *testing.T) {
 	}
 	if got != `C:\Users\v\Downloads\demo file.txt` {
 		t.Fatalf("non-windows path should preserve backslashes, got %q", got)
+	}
+}
+
+func TestNormalizeLocalPathInputPreservesRoot(t *testing.T) {
+	if got := normalizeLocalPathInput(`/`); got != `/` {
+		t.Fatalf("normalizeLocalPathInput(/) = %q, want /", got)
 	}
 }
 

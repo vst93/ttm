@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,7 +41,10 @@ func showActionMenu(tty io.Writer, stdinReader io.Reader, loc locale) (uploadAct
 	fmt.Fprintf(tty, "\r\n  %s: ", hint)
 
 	for {
-		b, ok := readSignificantByte(stdinReader)
+		b, ok, err := readSignificantByteErr(stdinReader)
+		if err != nil {
+			return 0, false
+		}
 		if !ok {
 			continue
 		}
@@ -76,7 +81,10 @@ func readInputLine(tty io.Writer, stdinReader io.Reader, defaultVal string, tabC
 		// First byte via readSignificantByte so terminal escape sequences
 		// (OSC/CSI responses from starship/oh-my-zsh) are drained instead
 		// of polluting the input field. A standalone Esc cancels.
-		b, ok := readSignificantByte(stdinReader)
+		b, ok, err := readSignificantByteErr(stdinReader)
+		if err != nil {
+			return ""
+		}
 		if !ok {
 			continue
 		}
@@ -210,7 +218,10 @@ func readRemotePath(tty io.Writer, stdinReader io.Reader, client *ssh.Client, de
 	for {
 		// First byte via readSignificantByte so terminal escape sequences
 		// are drained (Tab/path input is not polluted by OSC/CSI responses).
-		b, ok := readSignificantByte(stdinReader)
+		b, ok, err := readSignificantByteErr(stdinReader)
+		if err != nil {
+			return ""
+		}
 		if !ok {
 			continue
 		}
@@ -332,6 +343,9 @@ func normalizeRemotePathInput(s string) string {
 	s = trimMatchingQuotes(s)
 	s = strings.ReplaceAll(s, `\ `, " ")
 	s = strings.ReplaceAll(s, `\\`, `\`)
+	if s != "" && strings.Trim(s, "/") == "" {
+		return "/"
+	}
 	return strings.TrimRight(s, "/")
 }
 
@@ -437,7 +451,14 @@ func normalizeLocalPathInput(s string) string {
 				s = filepath.Join(home, s[2:])
 			}
 		}
+		volume := filepath.VolumeName(s)
+		if rest := strings.TrimPrefix(s, volume); rest != "" && strings.Trim(rest, `\/`) == "" {
+			return s
+		}
 		return strings.TrimRight(s, `\/`)
+	}
+	if s != "" && strings.Trim(s, "/") == "" {
+		return "/"
 	}
 	return strings.TrimRight(s, "/")
 }
@@ -466,11 +487,11 @@ func remoteTabComplete(client *ssh.Client, input string) (string, []string) {
 	}
 
 	// Split input into directory and partial filename.
-	dir := filepath.Dir(input)
+	dir := path.Dir(input)
 	if input == "" {
 		dir = "."
 	}
-	prefix := filepath.Base(input)
+	prefix := path.Base(input)
 	if strings.HasSuffix(input, "/") {
 		dir = input
 		prefix = ""
@@ -506,7 +527,7 @@ func remoteTabComplete(client *ssh.Client, input string) (string, []string) {
 	if dir == "." {
 		completed = firstMatch.name
 	} else {
-		completed = filepath.Join(dir, firstMatch.name)
+		completed = path.Join(dir, firstMatch.name)
 	}
 	if firstMatch.isDir {
 		completed += "/"
@@ -522,7 +543,7 @@ func listRemoteEntries(client *ssh.Client, dir string) ([]remoteEntry, error) {
 	}
 	// Print one entry per line as: <name><TAB><type>, where type is d or f.
 	// Using a single find avoids a second round-trip just to test the first match.
-	script := "find " + shQuote(dir) + " -mindepth 1 -maxdepth 1 \\( -type d -printf '%f\\td\\n' -o -printf '%f\\tf\\n' \\) 2>/dev/null"
+	script := "find " + shPathArg(dir) + " -mindepth 1 -maxdepth 1 \\( -type d -printf '%f\\td\\n' -o -printf '%f\\tf\\n' \\) 2>/dev/null"
 	out, err := remoteRunSh(client, script, 5*time.Second)
 	if err != nil {
 		return nil, err
@@ -684,18 +705,10 @@ func handleUploadAction(tty io.Writer, stdinReader io.Reader, client *ssh.Client
 		return
 	}
 
-	// Set up cancel listener.
-	ctx, cancel := context.WithCancel(context.Background())
-	stopCancel := startCancelListener(stdinReader, cancel)
-	defer func() {
-		cancel()
-		stopCancel() // close pipe, wait for copy goroutine to exit
-	}()
-
 	if fi.IsDir() {
-		handleDirUpload(tty, stdinReader, client, info, localPath, remoteDir, ctx, loc)
+		handleDirUpload(tty, stdinReader, client, info, localPath, remoteDir, loc)
 	} else {
-		handleFileUpload(tty, stdinReader, client, info, localPath, remoteDir, fi.Size(), ctx, loc)
+		handleFileUpload(tty, stdinReader, client, info, localPath, remoteDir, fi.Size(), loc)
 	}
 
 	printEndBanner(tty, loc)
@@ -711,7 +724,10 @@ func confirmTransfer(tty io.Writer, stdinReader io.Reader, summary string, loc l
 	fmt.Fprintf(tty, "  %s", confirmHint)
 
 	for {
-		b, ok := readSignificantByte(stdinReader)
+		b, ok, err := readSignificantByteErr(stdinReader)
+		if err != nil {
+			return false
+		}
 		if !ok {
 			continue
 		}
@@ -728,7 +744,7 @@ func confirmTransfer(tty io.Writer, stdinReader io.Reader, summary string, loc l
 }
 
 // handleFileUpload uploads a single file with progress.
-func handleFileUpload(tty io.Writer, stdinReader io.Reader, client *ssh.Client, info sshConnInfo, localPath, remoteDir string, size int64, ctx context.Context, loc locale) {
+func handleFileUpload(tty io.Writer, stdinReader io.Reader, client *ssh.Client, info sshConnInfo, localPath, remoteDir string, size int64, loc locale) {
 	// Show confirmation.
 	uploadLabel := localeT(loc, "Upload", "上传")
 	summary := fmt.Sprintf("\r\n  %s: %s (%s) -> %s:%s/\r\n",
@@ -736,6 +752,8 @@ func handleFileUpload(tty io.Writer, stdinReader io.Reader, client *ssh.Client, 
 	if !confirmTransfer(tty, stdinReader, summary, loc) {
 		return
 	}
+	ctx, stopCancel := transferCancelContext(stdinReader)
+	defer stopCancel()
 
 	progressLabel := localeT(loc, "uploading", "正在上传")
 	sizeLabel := localeT(loc, "size", "大小")
@@ -776,7 +794,7 @@ func handleFileUpload(tty io.Writer, stdinReader io.Reader, client *ssh.Client, 
 }
 
 // handleDirUpload uploads a directory recursively with file count progress.
-func handleDirUpload(tty io.Writer, stdinReader io.Reader, client *ssh.Client, info sshConnInfo, localDir, remoteDir string, ctx context.Context, loc locale) {
+func handleDirUpload(tty io.Writer, stdinReader io.Reader, client *ssh.Client, info sshConnInfo, localDir, remoteDir string, loc locale) {
 	// Pre-scan to count files and total size.
 	scanLabel := localeT(loc, "scanning directory...", "扫描目录中...")
 	fmt.Fprintf(tty, "\x1b[36m⋯ %s\x1b[0m\r", scanLabel)
@@ -804,6 +822,8 @@ func handleDirUpload(tty io.Writer, stdinReader io.Reader, client *ssh.Client, i
 	if !confirmTransfer(tty, stdinReader, summary, loc) {
 		return
 	}
+	ctx, stopCancel := transferCancelContext(stdinReader)
+	defer stopCancel()
 
 	upLabel := localeT(loc, "uploading directory", "正在上传目录")
 	cancelHint := localeT(loc, "Esc/Ctrl+C to cancel", "Esc/Ctrl+C 取消")
@@ -902,6 +922,15 @@ func startCancelListener(stdinReader io.Reader, cancel context.CancelFunc) (stop
 	return func() {
 		close(stopCh)
 		<-done
+	}
+}
+
+func transferCancelContext(stdinReader io.Reader) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	stopListener := startCancelListener(stdinReader, cancel)
+	return ctx, func() {
+		cancel()
+		stopListener()
 	}
 }
 
@@ -1175,6 +1204,18 @@ func countFiles(dir string) (int, int64, error) {
 
 // ── SCP protocol ─────────────────────────────────────────────────────────────
 
+func closeSessionOnCancel(ctx context.Context, session *ssh.Session) func() {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = session.Close()
+		case <-done:
+		}
+	}()
+	return func() { close(done) }
+}
+
 // scpUploadFile uploads a single file using the SCP protocol over an existing
 // SSH connection. Supports context cancellation — closes session to abort.
 func scpUploadFile(ctx context.Context, client *ssh.Client, remoteDir, localPath string, progress io.Writer) error {
@@ -1199,11 +1240,8 @@ func scpUploadFile(ctx context.Context, client *ssh.Client, remoteDir, localPath
 	}
 	defer session.Close()
 
-	// Close session on context cancellation to abort io.Copy immediately.
-	go func() {
-		<-ctx.Done()
-		session.Close()
-	}()
+	stopCancelWatch := closeSessionOnCancel(ctx, session)
+	defer stopCancelWatch()
 
 	stdin, err := session.StdinPipe()
 	if err != nil {
@@ -1215,8 +1253,11 @@ func scpUploadFile(ctx context.Context, client *ssh.Client, remoteDir, localPath
 	}
 
 	filename := filepath.Base(localPath)
+	if err := validateSCPName(filename); err != nil {
+		return err
+	}
 	debugf("scp-upload: start path=%s size=%d remote=%s", localPath, stat.Size(), remoteDir)
-	if err := session.Start(fmt.Sprintf("scp -t %q", remoteDir)); err != nil {
+	if err := session.Start(remoteSCPCommand(false, true, remoteDir)); err != nil {
 		debugf("scp-upload: Start err=%v", err)
 		return fmt.Errorf("start remote scp: %w", err)
 	}
@@ -1288,11 +1329,8 @@ func scpUploadDir(ctx context.Context, client *ssh.Client, remoteParent, localDi
 	}
 	defer session.Close()
 
-	// Close session on context cancellation to abort immediately.
-	go func() {
-		<-ctx.Done()
-		session.Close()
-	}()
+	stopCancelWatch := closeSessionOnCancel(ctx, session)
+	defer stopCancelWatch()
 
 	stdin, err := session.StdinPipe()
 	if err != nil {
@@ -1304,7 +1342,7 @@ func scpUploadDir(ctx context.Context, client *ssh.Client, remoteParent, localDi
 	}
 
 	// scp -r -t = recursive receive mode.
-	if err := session.Start(fmt.Sprintf("scp -r -t %q", remoteParent)); err != nil {
+	if err := session.Start(remoteSCPCommand(true, true, remoteParent)); err != nil {
 		return fmt.Errorf("start remote scp: %w", err)
 	}
 
@@ -1382,11 +1420,13 @@ func sendDirRecursive(stdin io.Writer, readResp func() error, rootDir, localDir 
 		}
 
 		// Send regular file.
+		var onBytes func(int)
 		if progress != nil {
 			relPath, _ := filepath.Rel(rootDir, fullPath)
 			progress.update(relPath)
+			onBytes = progress.addBytes
 		}
-		if err := sendFileEntry(stdin, fullPath, fi, nil, progress.addBytes); err != nil {
+		if err := sendFileEntry(stdin, fullPath, fi, nil, onBytes); err != nil {
 			return err
 		}
 		if err := readResp(); err != nil {
@@ -1395,11 +1435,17 @@ func sendDirRecursive(stdin io.Writer, readResp func() error, rootDir, localDir 
 	}
 
 	// End of directory.
-	return sendDirEnd(stdin)
+	if err := sendDirEnd(stdin); err != nil {
+		return err
+	}
+	return readResp()
 }
 
 // sendDirEntry sends an SCP directory entry: D<mode> 0 <name>\n
 func sendDirEntry(stdin io.Writer, name string, mode os.FileMode) error {
+	if err := validateSCPName(name); err != nil {
+		return err
+	}
 	cmd := fmt.Sprintf("D0%o 0 %s\n", mode.Perm(), name)
 	_, err := stdin.Write([]byte(cmd))
 	return err
@@ -1420,6 +1466,9 @@ func sendFileEntry(stdin io.Writer, localPath string, info os.FileInfo, progress
 	defer f.Close()
 
 	// Send file header: C<mode> <size> <name>\n
+	if err := validateSCPName(info.Name()); err != nil {
+		return err
+	}
 	mode := fmt.Sprintf("0%o", info.Mode().Perm())
 	header := fmt.Sprintf("C%s %d %s\n", mode, info.Size(), info.Name())
 	if _, err := stdin.Write([]byte(header)); err != nil {
@@ -1456,8 +1505,9 @@ func buildScpCommand(info sshConnInfo, remoteDir, localPath string) string {
 	if user == "" {
 		user = "root"
 	}
-	return fmt.Sprintf("scp -P %d %s %s@%s:%s/",
-		port, localPath, user, info.Host, remoteDir)
+	remoteTarget := user + "@" + info.Host + ":" + strings.TrimRight(remoteDir, "/") + "/"
+	return fmt.Sprintf("scp -P %d %s %s",
+		port, shQuote(localPath), shQuote(remoteTarget))
 }
 
 // formatFileSize returns a human-readable file size string.
@@ -1519,14 +1569,6 @@ func handleDownloadAction(tty io.Writer, stdinReader io.Reader, client *ssh.Clie
 		localDir = defaultLocal
 	}
 
-	// Set up cancel listener.
-	ctx, cancel := context.WithCancel(context.Background())
-	stopCancel := startCancelListener(stdinReader, cancel)
-	defer func() {
-		cancel()
-		stopCancel()
-	}()
-
 	// Try to stat the remote path to determine if it's a file or directory.
 	isDir, size, err := remoteStat(client, remotePath)
 	if err != nil {
@@ -1537,9 +1579,9 @@ func handleDownloadAction(tty io.Writer, stdinReader io.Reader, client *ssh.Clie
 	}
 
 	if isDir {
-		handleDirDownload(tty, stdinReader, client, remotePath, localDir, ctx, loc)
+		handleDirDownload(tty, stdinReader, client, remotePath, localDir, loc)
 	} else {
-		handleFileDownload(tty, stdinReader, client, remotePath, localDir, size, ctx, loc)
+		handleFileDownload(tty, stdinReader, client, remotePath, localDir, size, loc)
 	}
 
 	printEndBanner(tty, loc)
@@ -1551,8 +1593,8 @@ func handleDownloadAction(tty io.Writer, stdinReader io.Reader, client *ssh.Clie
 // (`test -d`, then `test -f + stat`), which was noticeable on higher-latency
 // SSH links and startup-heavy shells.
 func remoteStat(client *ssh.Client, remotePath string) (isDir bool, size int64, err error) {
-	script := "if test -d " + shQuote(remotePath) + "; then echo d; " +
-		"elif test -f " + shQuote(remotePath) + "; then printf 'f '; stat -c %s " + shQuote(remotePath) + "; " +
+	script := "if test -d " + shPathArg(remotePath) + "; then echo d; " +
+		"elif test -f " + shPathArg(remotePath) + "; then printf 'f '; stat -c %s -- " + shPathArg(remotePath) + "; " +
 		"fi"
 	out, err := remoteRunSh(client, script, 5*time.Second)
 	debugf("remoteStat: path=%q -> out=%q err=%v", remotePath, out, err)
@@ -1577,8 +1619,8 @@ func parseRemoteStatOutput(out, remotePath string) (isDir bool, size int64, err 
 }
 
 // handleFileDownload downloads a single remote file to local Downloads dir.
-func handleFileDownload(tty io.Writer, stdinReader io.Reader, client *ssh.Client, remotePath, localDir string, size int64, ctx context.Context, loc locale) {
-	filename := filepath.Base(remotePath)
+func handleFileDownload(tty io.Writer, stdinReader io.Reader, client *ssh.Client, remotePath, localDir string, size int64, loc locale) {
+	filename := path.Base(remotePath)
 	localPath := uniqueLocalPath(filepath.Join(localDir, filename))
 
 	// Show confirmation.
@@ -1586,6 +1628,13 @@ func handleFileDownload(tty io.Writer, stdinReader io.Reader, client *ssh.Client
 	summary := fmt.Sprintf("\r\n  %s: %s (%s) → %s/\r\n",
 		downloadLabel, filename, formatFileSize(size), localDir)
 	if !confirmTransfer(tty, stdinReader, summary, loc) {
+		return
+	}
+	ctx, stopCancel := transferCancelContext(stdinReader)
+	defer stopCancel()
+	if err := os.MkdirAll(localDir, 0755); err != nil {
+		errLabel := localeT(loc, "create local directory failed", "创建本地目录失败")
+		fmt.Fprintf(tty, "\x1b[31m✗ %s: %s\x1b[0m\r\n", errLabel, err.Error())
 		return
 	}
 
@@ -1596,7 +1645,7 @@ func handleFileDownload(tty io.Writer, stdinReader io.Reader, client *ssh.Client
 
 	progress := &ttyProgress{tty: tty, total: size, loc: loc}
 	stopTicker := progress.startLiveRenderer()
-	err := scpDownloadFile(ctx, client, remotePath, localPath, progress)
+	actualPath, err := scpDownloadFile(ctx, client, remotePath, localPath, progress)
 	stopTicker()
 	if err == nil {
 		progress.finish()
@@ -1617,15 +1666,15 @@ func handleFileDownload(tty io.Writer, stdinReader io.Reader, client *ssh.Client
 
 	successLabel := localeT(loc, "downloaded", "已下载")
 	sizeLabel := localeT(loc, "size", "大小")
-	fmt.Fprintf(tty, "\x1b[32m✓ %s %s → %s/\x1b[0m\r\n", successLabel, filename, localDir)
+	fmt.Fprintf(tty, "\x1b[32m✓ %s %s → %s\x1b[0m\r\n", successLabel, filename, actualPath)
 	if size > 0 {
 		fmt.Fprintf(tty, "\x1b[2m  %s: %s\x1b[0m\r\n", sizeLabel, formatFileSize(size))
 	}
 }
 
 // handleDirDownload downloads a remote directory recursively to local Downloads dir.
-func handleDirDownload(tty io.Writer, stdinReader io.Reader, client *ssh.Client, remotePath, localDir string, ctx context.Context, loc locale) {
-	dirName := filepath.Base(remotePath)
+func handleDirDownload(tty io.Writer, stdinReader io.Reader, client *ssh.Client, remotePath, localDir string, loc locale) {
+	dirName := path.Base(remotePath)
 
 	// Count remote files first.
 	scanLabel := localeT(loc, "scanning remote directory...", "扫描远程目录...")
@@ -1649,6 +1698,8 @@ func handleDirDownload(tty io.Writer, stdinReader io.Reader, client *ssh.Client,
 	if !confirmTransfer(tty, stdinReader, summary, loc) {
 		return
 	}
+	ctx, stopCancel := transferCancelContext(stdinReader)
+	defer stopCancel()
 
 	downLabel := localeT(loc, "downloading directory", "正在下载目录")
 	cancelHint := localeT(loc, "Esc/Ctrl+C to cancel", "Esc/Ctrl+C 取消")
@@ -1690,7 +1741,7 @@ func countRemoteFiles(client *ssh.Client, remotePath string) (int, int64, error)
 	// stat -c %s prints each file size on its own line; awk sums sizes and
 	// counts lines. Output: "<count> <totalSize>". Falls back gracefully if
 	// stat fails on a file (skips it). Runs under /bin/sh via remoteRunSh.
-	script := "find " + shQuote(remotePath) + " -type f -exec stat -c %s {} + 2>/dev/null | awk '{s+=$1;c++} END{print c,s}'"
+	script := "find " + shPathArg(remotePath) + " -type f -exec stat -c %s -- {} + 2>/dev/null | awk '{s+=$1;c++} END{print c,s}'"
 	out, err := remoteRunSh(client, script, 5*time.Second)
 	if err != nil {
 		return 0, 0, err
@@ -1702,67 +1753,65 @@ func countRemoteFiles(client *ssh.Client, remotePath string) (int, int64, error)
 }
 
 // scpDownloadFile downloads a single file from remote using SCP protocol.
-func scpDownloadFile(ctx context.Context, client *ssh.Client, remotePath, localPath string, progress io.Writer) error {
+func scpDownloadFile(ctx context.Context, client *ssh.Client, remotePath, localPath string, progress io.Writer) (string, error) {
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return "", ctx.Err()
 	}
 
 	session, err := client.NewSession()
 	if err != nil {
-		return fmt.Errorf("open ssh session: %w", err)
+		return "", fmt.Errorf("open ssh session: %w", err)
 	}
 	defer session.Close()
 
-	go func() {
-		<-ctx.Done()
-		session.Close()
-	}()
+	stopCancelWatch := closeSessionOnCancel(ctx, session)
+	defer stopCancelWatch()
 
 	stdin, err := session.StdinPipe()
 	if err != nil {
-		return fmt.Errorf("open stdin pipe: %w", err)
+		return "", fmt.Errorf("open stdin pipe: %w", err)
 	}
 	stdout, err := session.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("open stdout pipe: %w", err)
+		return "", fmt.Errorf("open stdout pipe: %w", err)
 	}
 
-	if err := session.Start(fmt.Sprintf("scp -f %q", remotePath)); err != nil {
-		return fmt.Errorf("start remote scp: %w", err)
+	if err := session.Start(remoteSCPCommand(false, false, remotePath)); err != nil {
+		return "", fmt.Errorf("start remote scp: %w", err)
 	}
 
 	// Signal ready.
 	if _, err := stdin.Write([]byte{0}); err != nil {
-		return err
+		return "", err
 	}
 
 	// Read file header: C<mode> <size> <name>
 	header, err := readSCPLine(stdout)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if header[0] != 'C' {
-		return fmt.Errorf("unexpected scp response: %q", header)
-	}
-
-	var mode string
-	var size int64
-	var name string
-	if _, err := fmt.Sscanf(header, "%s %d %s", &mode, &size, &name); err != nil {
-		return fmt.Errorf("parse scp header: %w", err)
+	_, size, _, err := parseSCPHeader(header, 'C')
+	if err != nil {
+		return "", err
 	}
 
 	// Signal ready for data.
 	if _, err := stdin.Write([]byte{0}); err != nil {
-		return err
+		return "", err
 	}
 
-	// Create local file.
-	f, err := os.Create(localPath)
+	// Create local file without following a pre-existing symlink.
+	f, actualPath, err := createUniqueSCPFile(localPath)
 	if err != nil {
-		return fmt.Errorf("create local file: %w", err)
+		return "", fmt.Errorf("create local file: %w", err)
 	}
-	defer f.Close()
+	complete := false
+	defer func() {
+		_ = f.Close()
+		if !complete {
+			_ = os.Remove(actualPath)
+		}
+	}()
 
 	// Read file data.
 	var writer io.Writer = f
@@ -1770,25 +1819,29 @@ func scpDownloadFile(ctx context.Context, client *ssh.Client, remotePath, localP
 		writer = io.MultiWriter(f, progress)
 	}
 	if _, err := io.CopyN(writer, stdout, size); err != nil {
-		return fmt.Errorf("read file data: %w", err)
+		return "", fmt.Errorf("read file data: %w", err)
 	}
 
 	// Read end marker.
 	var endMarker [1]byte
 	if _, err := stdout.Read(endMarker[:]); err != nil {
-		return err
+		return "", err
 	}
 	if endMarker[0] != 0 {
-		return fmt.Errorf("unexpected end marker: 0x%02x", endMarker[0])
+		return "", fmt.Errorf("unexpected end marker: 0x%02x", endMarker[0])
 	}
 
 	// Acknowledge.
 	if _, err := stdin.Write([]byte{0}); err != nil {
-		return err
+		return "", err
 	}
 
 	_ = stdin.Close()
-	return session.Wait()
+	if err := session.Wait(); err != nil {
+		return "", err
+	}
+	complete = true
+	return actualPath, nil
 }
 
 // scpDownloadDir downloads a directory recursively from remote using SCP protocol.
@@ -1808,10 +1861,8 @@ func scpDownloadDir(ctx context.Context, client *ssh.Client, remotePath, localDi
 	}
 	defer session.Close()
 
-	go func() {
-		<-ctx.Done()
-		session.Close()
-	}()
+	stopCancelWatch := closeSessionOnCancel(ctx, session)
+	defer stopCancelWatch()
 
 	stdin, err := session.StdinPipe()
 	if err != nil {
@@ -1822,11 +1873,15 @@ func scpDownloadDir(ctx context.Context, client *ssh.Client, remotePath, localDi
 		return fmt.Errorf("open stdout pipe: %w", err)
 	}
 
-	if err := session.Start(fmt.Sprintf("scp -r -f %q", remotePath)); err != nil {
+	if err := session.Start(remoteSCPCommand(true, false, remotePath)); err != nil {
 		return fmt.Errorf("start remote scp: %w", err)
 	}
 
-	return recvDirRecursive(stdin, stdout, localDir, progress, ctx)
+	if err := recvDirRecursive(stdin, stdout, localDir, progress, ctx); err != nil {
+		return err
+	}
+	_ = stdin.Close()
+	return session.Wait()
 }
 
 // countingReader wraps an io.Reader and reports each Read's byte count to a
@@ -1862,6 +1917,7 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 
 // readSCPLine reads a newline-terminated line from the SCP protocol.
 func readSCPLine(r io.Reader) (string, error) {
+	const maxSCPLineBytes = 64 * 1024
 	var buf []byte
 	tmp := make([]byte, 1)
 	for {
@@ -1869,6 +1925,9 @@ func readSCPLine(r io.Reader) (string, error) {
 		if n == 1 {
 			if tmp[0] == '\n' {
 				return string(buf), nil
+			}
+			if len(buf) >= maxSCPLineBytes {
+				return "", fmt.Errorf("scp protocol line exceeds %d bytes", maxSCPLineBytes)
 			}
 			buf = append(buf, tmp[0])
 		}
@@ -1878,19 +1937,118 @@ func readSCPLine(r io.Reader) (string, error) {
 	}
 }
 
+func validateSCPName(name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "\x00\r\n") {
+		return fmt.Errorf("unsafe SCP entry name %q", name)
+	}
+	return nil
+}
+
+func parseSCPHeader(line string, wantKind byte) (mode string, size int64, name string, err error) {
+	if len(line) < 2 || line[0] != wantKind {
+		return "", 0, "", fmt.Errorf("unexpected scp response: %q", line)
+	}
+	parts := strings.SplitN(line[1:], " ", 3)
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" {
+		return "", 0, "", fmt.Errorf("malformed scp header: %q", line)
+	}
+	size, err = strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || size < 0 {
+		return "", 0, "", fmt.Errorf("invalid scp size in %q", line)
+	}
+	if err := validateSCPName(parts[2]); err != nil {
+		return "", 0, "", err
+	}
+	return parts[0], size, parts[2], nil
+}
+
+func safeSCPChildPath(parent, name string) (string, error) {
+	if err := validateSCPName(name); err != nil {
+		return "", err
+	}
+	if !filepath.IsLocal(name) || filepath.Base(name) != name {
+		return "", fmt.Errorf("SCP entry escapes destination: %q", name)
+	}
+	child := filepath.Join(parent, name)
+	if info, err := os.Lstat(child); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("refusing SCP entry through symlink: %q", name)
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("inspect local SCP destination: %w", err)
+	}
+	return child, nil
+}
+
+func createUniqueSCPFile(path string) (*os.File, string, error) {
+	candidate := path
+	for i := 0; i < 10000; i++ {
+		f, err := os.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err == nil {
+			return f, candidate, nil
+		}
+		if !os.IsExist(err) {
+			return nil, "", err
+		}
+		candidate = uniqueLocalPath(candidate)
+	}
+	return nil, "", fmt.Errorf("too many files with the same name: %q", path)
+}
+
+func receiveSCPFile(stdin io.Writer, stdout io.Reader, localPath string, size int64, progress *dirProgress) (err error) {
+	f, actualPath, err := createUniqueSCPFile(localPath)
+	if err != nil {
+		return err
+	}
+	complete := false
+	defer func() {
+		_ = f.Close()
+		if !complete {
+			_ = os.Remove(actualPath)
+		}
+	}()
+
+	var src io.Reader = stdout
+	if progress != nil {
+		src = &countingReader{r: stdout, onRead: progress.addBytes}
+	}
+	if _, err := io.CopyN(f, src, size); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+
+	var endMarker [1]byte
+	if _, err := io.ReadFull(stdout, endMarker[:]); err != nil {
+		return err
+	}
+	if endMarker[0] != 0 {
+		return fmt.Errorf("unexpected end marker: 0x%02x", endMarker[0])
+	}
+	if _, err := stdin.Write([]byte{0}); err != nil {
+		return err
+	}
+	complete = true
+	return nil
+}
+
 // recvDirRecursive receives a directory tree via SCP protocol.
 //
 // SCP download protocol flow:
 //  1. Send 0x00 (ready)
 //  2. Read entry: C (file), D (directory), E (end)
 //  3. If C: send 0x00, read data, read end marker, send 0x00 (ack)
-//  4. If D: create dir, send 0x00, recurse, send 0x00 (ack)
-//  5. If E: return (no ack needed)
+//  4. If D: create dir, send 0x00, recurse
+//  5. If E: send 0x00 (ack), then return
 func recvDirRecursive(stdin io.Writer, stdout io.Reader, localDir string, progress *dirProgress, ctx context.Context) error {
+	return recvDirRecursiveLevel(stdin, stdout, localDir, progress, ctx, true)
+}
+
+func recvDirRecursiveLevel(stdin io.Writer, stdout io.Reader, localDir string, progress *dirProgress, ctx context.Context, topLevel bool) error {
 	// Initial ready signal.
 	if _, err := stdin.Write([]byte{0}); err != nil {
 		return err
 	}
+	sawEntry := false
 
 	for {
 		if ctx.Err() != nil {
@@ -1900,11 +2058,10 @@ func recvDirRecursive(stdin io.Writer, stdout io.Reader, localDir string, progre
 		// Read response line.
 		line, err := readSCPLine(stdout)
 		if err != nil {
-			// EOF after top-level 'E' is normal — session closed.
-			if err == io.EOF {
+			if err == io.EOF && topLevel && sawEntry {
 				return nil
 			}
-			return err
+			return fmt.Errorf("read SCP entry: %w", err)
 		}
 
 		if len(line) == 0 {
@@ -1912,7 +2069,10 @@ func recvDirRecursive(stdin io.Writer, stdout io.Reader, localDir string, progre
 		}
 
 		switch line[0] {
-		case 'E': // End of directory — return, parent will ack.
+		case 'E': // End of directory.
+			if _, err := stdin.Write([]byte{0}); err != nil {
+				return err
+			}
 			return nil
 
 		case '\x01': // SCP error (e.g. socket, device — not transferable).
@@ -1921,75 +2081,50 @@ func recvDirRecursive(stdin io.Writer, stdout io.Reader, localDir string, progre
 			debugf("scp-dir: skipped error: %s", line[1:])
 			continue
 
-		case 'C': // File
-			var mode string
-			var size int64
-			var name string
-			if _, err := fmt.Sscanf(line, "%s %d %s", &mode, &size, &name); err != nil {
-				return fmt.Errorf("parse scp header: %w", err)
-			}
+		case '\x02':
+			return fmt.Errorf("remote SCP fatal error: %s", line[1:])
 
+		case 'C': // File
+			_, size, name, err := parseSCPHeader(line, 'C')
+			if err != nil {
+				return err
+			}
+			filePath, err := safeSCPChildPath(localDir, name)
+			if err != nil {
+				return err
+			}
 			// Signal ready for data.
 			if _, err := stdin.Write([]byte{0}); err != nil {
 				return err
 			}
 
-			// Create local file (auto-rename if exists).
-			filePath := uniqueLocalPath(filepath.Join(localDir, name))
-			f, err := os.Create(filePath)
-			if err != nil {
-				return err
-			}
-
-			// Read file data. Wrap stdout in a counting writer so the byte-level
-			// progress advances during large-file transfers (not just when a
-			// file finishes), keeping the live ticker meaningful.
-			var src io.Reader = stdout
-			if progress != nil {
-				src = &countingReader{r: stdout, onRead: progress.addBytes}
-			}
-			if _, err := io.CopyN(f, src, size); err != nil {
-				f.Close()
-				return err
-			}
-			f.Close()
-
-			// Read end marker.
-			var endMarker [1]byte
-			if _, err := stdout.Read(endMarker[:]); err != nil {
-				return err
-			}
-
-			// Acknowledge file received.
-			if _, err := stdin.Write([]byte{0}); err != nil {
+			if err := receiveSCPFile(stdin, stdout, filePath, size, progress); err != nil {
 				return err
 			}
 
 			if progress != nil {
 				progress.update(name)
 			}
+			sawEntry = true
 
 		case 'D': // Directory
-			var mode string
-			var size int64
-			var name string
-			if _, err := fmt.Sscanf(line, "%s %d %s", &mode, &size, &name); err != nil {
-				return fmt.Errorf("parse scp header: %w", err)
+			_, _, name, err := parseSCPHeader(line, 'D')
+			if err != nil {
+				return err
 			}
 
 			// Create subdirectory and recurse.
-			subDir := filepath.Join(localDir, name)
+			subDir, err := safeSCPChildPath(localDir, name)
+			if err != nil {
+				return err
+			}
 			if err := os.MkdirAll(subDir, 0755); err != nil {
 				return err
 			}
-			if err := recvDirRecursive(stdin, stdout, subDir, progress, ctx); err != nil {
+			if err := recvDirRecursiveLevel(stdin, stdout, subDir, progress, ctx, false); err != nil {
 				return err
 			}
-
-			// Acknowledge directory received.
-			if _, err := stdin.Write([]byte{0}); err != nil {
-				return err
-			}
+			sawEntry = true
 
 		default:
 			return fmt.Errorf("unexpected scp response: %q", line)

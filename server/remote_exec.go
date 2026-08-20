@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -37,24 +38,47 @@ import (
 //   is bash, zsh+oh-my-zsh, or fish. A per-call timeout guarantees a slow
 //   or hung remote shell can never block the interactive session.
 
-// shQuote double-quote-escapes s so it is taken literally by a POSIX shell.
-// Double quotes are used instead of single quotes because fish (unlike
-// bash/zsh) does not support the '\” single-quote escape idiom.
-// Escaped characters: \ " $ — the three characters special in double quotes
-// across POSIX sh, bash, and fish.
+// shQuote returns one POSIX-shell word whose value is exactly s. The script
+// containing it is encoded by wrapShScript before it reaches the login shell,
+// so fish/zsh/bash compatibility does not depend on their quoting rules.
 func shQuote(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	s = strings.ReplaceAll(s, `$`, `\$`)
-	return `"` + s + `"`
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
-// wrapShScript wraps a POSIX sh script so it can be handed to the remote
-// login shell (fish/zsh/bash) and still execute under /bin/sh verbatim.
-// Uses double-quote wrapping via shQuote so fish doesn't choke on the
-// '\”' single-quote escape idiom.
+// shPathArg quotes a remote path while preserving the conventional meaning of
+// ~ and ~/. Other tilde forms (such as ~otheruser) remain literal.
+func shPathArg(s string) string {
+	if s == "~" {
+		return `"$HOME"`
+	}
+	if strings.HasPrefix(s, "~/") {
+		return `"$HOME"/` + shQuote(strings.TrimPrefix(s, "~/"))
+	}
+	return shQuote(s)
+}
+
+// wrapShScript hands a script to /bin/sh without exposing any script byte to
+// the user's login shell. POSIX printf %b accepts \0NNN octal escapes, and the
+// resulting command contains only a fixed safe ASCII alphabet. This avoids
+// nested-quote injection while remaining compatible with fish, zsh, and sh.
 func wrapShScript(script string) string {
-	return "sh -c " + shQuote(script)
+	var encoded strings.Builder
+	encoded.Grow(len(script) * 5)
+	for _, b := range []byte(script) {
+		fmt.Fprintf(&encoded, `\0%03o`, b)
+	}
+	return "printf '%b' '" + encoded.String() + "' | sh"
+}
+
+func remoteSCPCommand(recursive bool, sink bool, remotePath string) string {
+	flags := "-f"
+	if sink {
+		flags = "-t"
+	}
+	if recursive {
+		flags = "-r " + flags
+	}
+	return wrapShScript("exec scp " + flags + " -- " + shPathArg(remotePath))
 }
 
 // remoteRunSh runs a POSIX sh script on the remote host with a timeout.
