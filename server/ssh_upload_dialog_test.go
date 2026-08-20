@@ -158,6 +158,46 @@ func TestReadInputLineTypingAfterTabAppends(t *testing.T) {
 	}
 }
 
+// The pre-filled path must survive the first keystroke: typing "/" used to wipe
+// the whole default, which is exactly what a user continuing the path does.
+func TestReadInputLineTypingKeepsPrefilledDefault(t *testing.T) {
+	stdin := &bytesReader{b: []byte("/sub/报表.xlsx\r")}
+	var tty bytes.Buffer
+	if got := readInputLine(&tty, stdin, "/root/temp", nil); got != "/root/temp/sub/报表.xlsx" {
+		t.Fatalf("readInputLine = %q, want the typed text appended to the default", got)
+	}
+}
+
+func TestReadInputLineCtrlUClearsPrefilledDefault(t *testing.T) {
+	stdin := &bytesReader{b: []byte("\x15/etc\r")}
+	var tty bytes.Buffer
+	if got := readInputLine(&tty, stdin, "/root/temp", nil); got != "/etc" {
+		t.Fatalf("readInputLine = %q, want Ctrl+U to clear the default first", got)
+	}
+}
+
+func TestReadRemotePathTypingKeepsPrefilledDefault(t *testing.T) {
+	stdin := &bytesReader{b: []byte("/报表.xlsx\r")}
+	var tty bytes.Buffer
+	if got := readRemotePath(&tty, stdin, nil, "/root/temp"); got != "/root/temp/报表.xlsx" {
+		t.Fatalf("readRemotePath = %q, want the typed text appended to the default", got)
+	}
+}
+
+func TestLocalDefaultsUseLaunchDirectory(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := localDefaultDir(); got != wd {
+		t.Fatalf("localDefaultDir() = %q, want the launch directory %q", got, wd)
+	}
+	prefix := localDefaultFilePrefix()
+	if !strings.HasPrefix(prefix, wd) || !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		t.Fatalf("localDefaultFilePrefix() = %q, want %q plus a trailing separator", prefix, wd)
+	}
+}
+
 func TestReadRemotePathTabKeepsDefaultWhenCompletionUnavailable(t *testing.T) {
 	stdin := &bytesReader{b: []byte("\t\r")}
 	var tty bytes.Buffer

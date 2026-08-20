@@ -123,9 +123,14 @@ func eraseCompletionHint(tty io.Writer, shown *bool) {
 // readInputLine reads a line of input with an optional pre-filled default value.
 // Supports full UTF-8 input including Chinese characters.
 // When tabComplete is non-nil, Tab triggers path completion.
+//
+// The pre-filled value behaves like text the user typed: the cursor sits at its
+// end, typing appends to it, Backspace edits it and Ctrl+U clears the whole
+// line. It is never wiped implicitly — a default the first keystroke destroys is
+// worse than no default, because the path it showed is already what the user
+// wanted to build on.
 func readInputLine(tty io.Writer, stdinReader io.Reader, defaultVal string, tabComplete func(string) (string, []string)) string {
 	input := []rune(defaultVal)
-	modified := false
 	hintShown := false
 	if len(input) > 0 {
 		fmt.Fprintf(tty, "%s", string(input))
@@ -180,10 +185,6 @@ func readInputLine(tty io.Writer, stdinReader io.Reader, defaultVal string, tabC
 		switch r {
 		case '\t': // Tab completion (if tabComplete is provided)
 			if tabComplete != nil {
-				// A pre-filled default is completed from, never discarded:
-				// Tab means "continue this path", so only mark the buffer as
-				// user-owned (so later typing appends instead of replacing).
-				modified = true
 				eraseCompletionHint(tty, &hintShown)
 				curInput := string(input)
 				completed, matches := tabComplete(curInput)
@@ -215,26 +216,14 @@ func readInputLine(tty io.Writer, stdinReader io.Reader, defaultVal string, tabC
 				w := runeWidth(last)
 				fmt.Fprint(tty, strings.Repeat("\b", w)+strings.Repeat(" ", w)+strings.Repeat("\b", w))
 			}
-			modified = true
 
 		case 0x15: // Ctrl+U — clear line
 			eraseCompletionHint(tty, &hintShown)
-			for len(input) > 0 {
-				last := input[len(input)-1]
-				input = input[:len(input)-1]
-				w := runeWidth(last)
-				fmt.Fprint(tty, strings.Repeat("\b", w)+strings.Repeat(" ", w)+strings.Repeat("\b", w))
-			}
-			modified = true
+			clearInputLine(tty, input)
+			input = input[:0]
 
 		default:
 			eraseCompletionHint(tty, &hintShown)
-			if !modified && len(input) > 0 {
-				// First printable char: clear pre-filled default, start fresh.
-				clearInputLine(tty, input)
-				input = input[:0]
-				modified = true
-			}
 			input = append(input, r)
 			fmt.Fprintf(tty, "%s", string(r))
 		}
@@ -259,11 +248,14 @@ func runeWidth(r rune) int {
 }
 
 // readRemotePath reads a remote path with Tab completion via SSH.
-// Single match: auto-complete fully. Multiple matches: auto-complete to first match.
+// Single match: auto-complete fully. Multiple matches: complete to the longest
+// common prefix and list the candidates.
 // Results are cached to avoid repeated SSH calls.
+//
+// The pre-filled remote cwd is editable text, not a placeholder: typing appends
+// to it, Ctrl+U clears the line. See readInputLine.
 func readRemotePath(tty io.Writer, stdinReader io.Reader, client *ssh.Client, defaultVal string) string {
 	input := []rune(defaultVal)
-	modified := false
 	hintShown := false
 
 	// Cache for Tab completion results.
@@ -322,9 +314,6 @@ func readRemotePath(tty io.Writer, stdinReader io.Reader, client *ssh.Client, de
 
 		switch r {
 		case '\t': // Tab — remote path completion
-			// The pre-filled default (remote cwd) is the base for completion,
-			// not something to throw away; only take ownership of the buffer.
-			modified = true
 			eraseCompletionHint(tty, &hintShown)
 			curInput := string(input)
 			var completed string
@@ -371,23 +360,15 @@ func readRemotePath(tty io.Writer, stdinReader io.Reader, client *ssh.Client, de
 			}
 			// Invalidate cache on input change.
 			cacheInput = ""
-			modified = true
 
 		case 0x15: // Ctrl+U
 			eraseCompletionHint(tty, &hintShown)
 			clearInputLine(tty, input)
 			input = nil
 			cacheInput = ""
-			modified = true
 
 		default:
 			eraseCompletionHint(tty, &hintShown)
-			if !modified && len(input) > 0 {
-				// First printable char: clear pre-filled default, start fresh.
-				clearInputLine(tty, input)
-				input = input[:0]
-				modified = true
-			}
 			input = append(input, r)
 			fmt.Fprintf(tty, "%s", string(r))
 			// Invalidate cache on input change.
@@ -695,10 +676,10 @@ func showUploadInputs(tty io.Writer, stdinReader io.Reader, client *ssh.Client, 
 	if dirDetected {
 		detectedTag := localeT(loc, "(detected)", "(已检测)")
 		fmt.Fprintf(tty, "  %s: \x1b[32m%s\x1b[0m\r\n", remoteLabel, detectedTag)
-		fmt.Fprintf(tty, "  \x1b[2m%s\x1b[0m", localeT(loc, "Press Enter to accept, or type a new path (Tab to complete): ", "按 Enter 接受，或输入新路径（Tab 补全）："))
+		fmt.Fprintf(tty, "  \x1b[2m%s\x1b[0m", localeT(loc, "Enter to accept, or edit it (Tab completes, Ctrl+U clears): ", "按 Enter 接受，或直接编辑（Tab 补全，Ctrl+U 清空）："))
 	} else {
-		fallbackTag := localeT(loc, "(home, type to override)", "(home 目录，可输入覆盖)")
-		fmt.Fprintf(tty, "  %s: \x1b[33m%s\x1b[0m \x1b[2m%s\x1b[0m ", remoteLabel, fallbackTag, localeT(loc, "(Tab to complete)", "(Tab 补全)"))
+		fallbackTag := localeT(loc, "(home)", "(home 目录)")
+		fmt.Fprintf(tty, "  %s: \x1b[33m%s\x1b[0m \x1b[2m%s\x1b[0m ", remoteLabel, fallbackTag, localeT(loc, "(Tab completes, Ctrl+U clears)", "(Tab 补全，Ctrl+U 清空)"))
 	}
 
 	remoteDir := normalizeRemotePathInput(readRemotePath(tty, stdinReader, client, defaultRemoteDir))
@@ -708,10 +689,21 @@ func showUploadInputs(tty io.Writer, stdinReader io.Reader, client *ssh.Client, 
 		return "", "", false
 	}
 
-	fmt.Fprintf(tty, "  %s: \x1b[2m%s\x1b[0m ", localLabel, localeT(loc, "(Tab to complete)", "(Tab 补全)"))
-	localPath := normalizeLocalPathInput(readInputLine(tty, stdinReader, "", localTabComplete))
+	fmt.Fprintf(tty, "  %s: \x1b[2m%s\x1b[0m ", localLabel, localeT(loc, "(Tab completes, Ctrl+U clears)", "(Tab 补全，Ctrl+U 清空)"))
+	localPath := normalizeLocalPathInput(readInputLine(tty, stdinReader, localDefaultFilePrefix(), localTabComplete))
 	if localPath == "" {
 		cancelMsg := localeT(loc, "cancelled (empty path)", "已取消（路径为空）")
+		fmt.Fprintf(tty, "\x1b[2m%s\x1b[0m\r\n", cancelMsg)
+		return "", "", false
+	}
+	// Accepting the pre-filled directory unchanged means no file was named.
+	// Uploading the whole launch directory on a stray Enter would be a nasty
+	// surprise, so ask again instead; "." after the prefix is the explicit way
+	// to send the directory itself.
+	if localPath == normalizeLocalPathInput(localDefaultFilePrefix()) {
+		cancelMsg := localeT(loc,
+			"cancelled (no file named; append a name, or \".\" to send the whole directory)",
+			"已取消（未指定文件；请在路径后补文件名，或用 \".\" 上传整个目录）")
 		fmt.Fprintf(tty, "\x1b[2m%s\x1b[0m\r\n", cancelMsg)
 		return "", "", false
 	}
@@ -1632,6 +1624,37 @@ func formatFileSize(bytes int64) string {
 
 // ── Download support ──────────────────────────────────────────────────────────
 
+// launchWorkingDir is the directory ttm was started from, captured at load time
+// (nothing in ttm changes the process working directory). Transfer dialogs
+// default to it rather than to ~/Downloads: the files a user wants to send, and
+// the place they want a download to land, are almost always in the shell they
+// launched ttm from.
+var launchWorkingDir = func() string {
+	if wd, err := os.Getwd(); err == nil && wd != "" {
+		return wd
+	}
+	return getDownloadsDir()
+}()
+
+// localDefaultDir returns the pre-filled local directory for transfer prompts.
+func localDefaultDir() string {
+	return launchWorkingDir
+}
+
+// localDefaultFilePrefix returns the pre-filled value for a local *file* field:
+// the launch directory with a trailing separator, so typing or Tab-completing a
+// name appends to a valid path.
+func localDefaultFilePrefix() string {
+	dir := localDefaultDir()
+	if dir == "" {
+		return ""
+	}
+	if strings.HasSuffix(dir, string(filepath.Separator)) {
+		return dir
+	}
+	return dir + string(filepath.Separator)
+}
+
 // getDownloadsDir returns the user's Downloads directory.
 func getDownloadsDir() string {
 	home, err := os.UserHomeDir()
@@ -1650,8 +1673,8 @@ func getDownloadsDir() string {
 // handleDownloadAction prompts for remote path and downloads to local Downloads dir.
 func handleDownloadAction(tty io.Writer, stdinReader io.Reader, client *ssh.Client, info sshConnInfo, remoteDir string, loc locale) {
 	// Ask for remote path with Tab completion.
-	remoteLabel := localeT(loc, "Remote path (Tab to complete)", "远程路径 (Tab 补全)")
-	fmt.Fprintf(tty, "\r\n  %s: ", remoteLabel)
+	remoteLabel := localeT(loc, "Remote path", "远程路径")
+	fmt.Fprintf(tty, "\r\n  %s \x1b[2m%s\x1b[0m: ", remoteLabel, localeT(loc, "(Tab completes, Ctrl+U clears)", "(Tab 补全，Ctrl+U 清空)"))
 
 	remotePath := normalizeRemotePathInput(readRemotePath(tty, stdinReader, client, remoteDir+"/"))
 	if remotePath == "" {
@@ -1661,10 +1684,10 @@ func handleDownloadAction(tty io.Writer, stdinReader io.Reader, client *ssh.Clie
 		return
 	}
 
-	// Ask for local save directory (default: Downloads).
-	defaultLocal := getDownloadsDir()
+	// Ask for local save directory (default: the directory ttm was started in).
+	defaultLocal := localDefaultDir()
 	localLabel := localeT(loc, "Local save dir", "本地保存目录")
-	fmt.Fprintf(tty, "  %s: ", localLabel)
+	fmt.Fprintf(tty, "  %s \x1b[2m%s\x1b[0m: ", localLabel, localeT(loc, "(Tab completes, Ctrl+U clears)", "(Tab 补全，Ctrl+U 清空)"))
 	localDir := normalizeLocalPathInput(readInputLine(tty, stdinReader, defaultLocal, localTabComplete))
 	if localDir == "" {
 		localDir = defaultLocal
