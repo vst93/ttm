@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"io"
 	"net/url"
 	"path"
@@ -156,11 +157,12 @@ func normalizeRemoteDir(dir string) string {
 }
 
 type remoteOutputCwdWriter struct {
-	dst    io.Writer
-	cache  *remoteCwdCache
-	mu     sync.Mutex
-	state  int
-	oscBuf []byte
+	dst       io.Writer
+	cache     *remoteCwdCache
+	mu        sync.Mutex
+	state     int
+	oscBuf    []byte
+	ignoreOSC bool
 }
 
 const (
@@ -171,8 +173,10 @@ const (
 )
 
 func newRemoteOutputCwdWriter(dst io.Writer, cache *remoteCwdCache) io.Writer {
-	if dst == nil {
-		return nil
+	// Without tracking, return the destination itself: no wrapper, parser or
+	// lock on the output path. Used by the SSH passthrough mode.
+	if dst == nil || cache == nil {
+		return dst
 	}
 	return &remoteOutputCwdWriter{dst: dst, cache: cache}
 }
@@ -192,56 +196,103 @@ func (w *remoteOutputCwdWriter) parse(p []byte) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	for _, b := range p {
+	for len(p) > 0 {
 		switch w.state {
 		case oscStateNormal:
-			if b == 0x1b {
-				w.state = oscStateEsc
+			// Most TUI traffic is text and CSI (colors/cursor movement), not
+			// OSC. Search whole spans instead of running a state machine on
+			// every output byte. Preserve a trailing ESC across SSH reads.
+			i := bytes.Index(p, []byte("\x1b]"))
+			if i < 0 {
+				if p[len(p)-1] == 0x1b {
+					w.state = oscStateEsc
+				}
+				return
 			}
+			p = p[i+2:]
+			w.state = oscStateBody
+			w.oscBuf = w.oscBuf[:0]
+			w.ignoreOSC = false
 		case oscStateEsc:
+			b := p[0]
+			p = p[1:]
 			if b == ']' {
 				w.state = oscStateBody
 				w.oscBuf = w.oscBuf[:0]
-			} else {
+				w.ignoreOSC = false
+			} else if b != 0x1b {
 				w.state = oscStateNormal
 			}
 		case oscStateBody:
-			switch b {
-			case 0x07:
+			// IndexByte uses the optimized byte-search implementation. Limit
+			// the BEL search to the span before ESC, whichever comes first.
+			i := bytes.IndexByte(p, 0x1b)
+			end := len(p)
+			if i >= 0 {
+				end = i
+			}
+			if bell := bytes.IndexByte(p[:end], 0x07); bell >= 0 {
+				i = bell
+			}
+			if i < 0 {
+				w.appendOSC(p)
+				return
+			}
+			w.appendOSC(p[:i])
+			if p[i] == 0x07 {
 				w.consumeOSC()
 				w.state = oscStateNormal
-			case 0x1b:
+			} else {
 				w.state = oscStateBodyEsc
-			default:
-				if len(w.oscBuf) < 4096 {
-					w.oscBuf = append(w.oscBuf, b)
-				}
 			}
+			p = p[i+1:]
 		case oscStateBodyEsc:
+			b := p[0]
+			p = p[1:]
 			if b == '\\' {
 				w.consumeOSC()
 				w.state = oscStateNormal
 				continue
 			}
-			if len(w.oscBuf) < 4096 {
-				w.oscBuf = append(w.oscBuf, 0x1b)
-				if b != 0x07 {
-					w.oscBuf = append(w.oscBuf, b)
-				}
-			}
+			w.appendOSC([]byte{0x1b})
 			if b == 0x07 {
 				w.consumeOSC()
 				w.state = oscStateNormal
 			} else {
+				w.appendOSC([]byte{b})
 				w.state = oscStateBody
 			}
 		}
 	}
 }
 
+// Only retain OSC 7 file URLs. Titles, hyperlinks and clipboard/image payloads
+// are forwarded untouched but need no allocation or string conversion here.
+func (w *remoteOutputCwdWriter) appendOSC(p []byte) {
+	if w.ignoreOSC {
+		return
+	}
+	const prefix = "7;file://"
+	if len(w.oscBuf) < len(prefix) {
+		n := min(len(p), len(prefix)-len(w.oscBuf))
+		if !bytes.Equal(p[:n], []byte(prefix[len(w.oscBuf):len(w.oscBuf)+n])) {
+			w.ignoreOSC = true
+		}
+	}
+	// Reject oversized OSCs rather than caching a silently truncated path.
+	if w.ignoreOSC || len(w.oscBuf)+len(p) > 4096 {
+		w.ignoreOSC = true
+		w.oscBuf = w.oscBuf[:0]
+		return
+	}
+	w.oscBuf = append(w.oscBuf, p...)
+}
+
 func (w *remoteOutputCwdWriter) consumeOSC() {
-	if dir, ok := parseOSC7Dir(string(w.oscBuf)); ok {
-		w.cache.Set(dir)
+	if !w.ignoreOSC {
+		if dir, ok := parseOSC7Dir(string(w.oscBuf)); ok {
+			w.cache.Set(dir)
+		}
 	}
 	w.oscBuf = w.oscBuf[:0]
 }

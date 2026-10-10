@@ -145,6 +145,13 @@ func triggerMode() string {
 // not logged, so the trace stays small. Used to confirm whether Ctrl+G
 // (0x07) is actually reaching the local stdin reader.
 func debugChunk(data []byte) {
+	// SGR mouse reports (ESC [ < ... M/m) arrive in bursts of hundreds per
+	// second while scrolling with a trackpad. Logging them buries the
+	// diagnostic trace and was filling the 256KB log, truncating away the
+	// session-start lines (latency/bandwidth probes) that matter.
+	if bytes.HasPrefix(data, []byte("\x1b[<")) {
+		return
+	}
 	for _, b := range data {
 		if b == ctrlGByte || (b < 0x20 && b != '\r' && b != '\n' && b != '\t') {
 			n := len(data)
