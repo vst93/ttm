@@ -434,7 +434,10 @@ func (c *defaultClient) Login() error {
 	}
 
 	cwdCache := newRemoteCwdCache()
-	stdoutWriter := newRemoteOutputCwdWriter(os.Stdout, cwdCache)
+	// Records when the remote last produced output, so the cwd hook can wait
+	// for the shell to settle instead of typing over the login banner.
+	activity := newActivityWriter(os.Stdout)
+	stdoutWriter := newRemoteOutputCwdWriter(activity, cwdCache)
 	session.Stdout = stdoutWriter
 	session.Stderr = stdoutWriter
 	stdinPipe, err := session.StdinPipe()
@@ -442,10 +445,17 @@ func (c *defaultClient) Login() error {
 		return fmt.Errorf("open remote stdin pipe: %w", err)
 	}
 
+	// Learn the login shell before the interactive session starts. The probe
+	// costs a round trip and can be slow on framework-heavy shells, and it must
+	// not delay keystroke forwarding once the shell is running.
+	remoteShell := remoteLoginShell(client)
+
 	err = session.Shell()
 	if err != nil {
 		return fmt.Errorf("start remote shell: %w", err)
 	}
+
+	installRemoteCwdHook(client, remoteShell, stdinPipe, activity)
 
 	// then callback
 	if c.node.CallbackShells != nil {
